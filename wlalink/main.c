@@ -76,7 +76,7 @@ int main(int argc, char *argv[]) {
 
   if (i == FAILED) {
     printf("\nWLALINK GB-Z80/Z80/6502/65C02/6510/65816/HUC6280/SPC-700 WLA Macro Assembler Linker v5.7\n");
-    printf("Written by Ville Helin in 2000-2008\n");
+    printf("Written by Ville Helin in 2000-2008 - In GitHub since 2014: https://github.com/vhelin/wla-dx\n");
     printf("USAGE: %s [-bdirsSv] <LINK FILE> <OUTPUT FILE>\n", argv[0]);
     printf("Options:\n");
     printf("b  Program file output\n");
@@ -215,6 +215,14 @@ int main(int argc, char *argv[]) {
     s = stacks_first;
     while (s != NULL) {
       printf("--------------------------------------\n");
+      {
+	int z;
+	
+	for (z = 0; z < s->stacksize; z++) {
+	  struct stackitem *si = &s->stack[z];
+	  printf("stackitem: \"%s\" %d %d %f\n", si->string, si->type, si->sign, si->value);
+	}
+      }
       printf("result: \"%d\"\n", s->result);
       printf("id: \"%d\"\n", s->id);
       printf("file_id: \"%d\"\n", s->file_id);
@@ -228,6 +236,9 @@ int main(int argc, char *argv[]) {
   }
 #endif
 
+  /* reserve the bytes the checksummers will use, so no (free type) sections will be placed there */
+  reserve_checksum_bytes();
+  
   /* insert sections */
   if (insert_sections() == FAILED)
     return 1;
@@ -242,12 +253,13 @@ int main(int argc, char *argv[]) {
       printf("--------------------------------------\n");
       printf("file: \"%s\"\n", get_file_name(s->file_id));
       printf("name: \"%s\"\n", s->name);
-      printf("id:   %d\n", s->id);
-      printf("addr: %d\n", s->address);
-      printf("stat: %d\n", s->status);
-      printf("bank: %d\n", s->bank);
-      printf("slot: %d\n", s->slot);
-      printf("size: %d\n", s->size);
+      printf("id:    %d\n", s->id);
+      printf("addr:  %d\n", s->address);
+      printf("stat:  %d\n", s->status);
+      printf("bank:  %d\n", s->bank);
+      printf("slot:  %d\n", s->slot);
+      printf("size:  %d\n", s->size);
+      printf("align: %d\n", s->alignment);
       s = s->next;
     }
     printf("--------------------------------------\n");
@@ -270,6 +282,14 @@ int main(int argc, char *argv[]) {
     s = stacks_first;
     while (s != NULL) {
       printf("--------------------------------------\n");
+      {
+	int z;
+	
+	for (z = 0; z < s->stacksize; z++) {
+	  struct stackitem *si = &s->stack[z];
+	  printf("stackitem: \"%s\" %d %d %f\n", si->string, si->type, si->sign, si->value);
+	}
+      }
       printf("result: \"%d\"\n", s->result);
       printf("id: \"%d\"\n", s->id);
       printf("file_id: \"%d\"\n", s->file_id);
@@ -329,7 +349,7 @@ int main(int argc, char *argv[]) {
       printf("sect: \"%d\"\n", l->section);
       printf("slot: \"%d\"\n", l->slot);
       printf("base: \"%d\"\n", l->base);
-      printf("address: \"%d\"\n", (int)l->address);
+      printf("address: \"%d\" / \"%x\"\n", (int)l->address, (int)l->address);
       printf("rom_address: \"%d\"\n", l->rom_address);
       printf("bank: \"%d\"\n", l->bank);
       printf("status: \"%d\"\n", l->status);

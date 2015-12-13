@@ -6,18 +6,22 @@
 # errors, we'll assume that WLA DX is in ok shape. Feel free to add more
 # test projects to the lot.
 #
-# these tests aren't really unit tests, but hopefully one day the will be. :)
+# these tests aren't really unit tests, but hopefully one day they will be. :)
 #
 
 changePlatform() {
     echo ""
+    echo "************************************************************"
     echo $1
-    echo ""
+    echo "************************************************************"
     cd $1
 }
 
 runTest() {
     cd $1
+    echo ""
+    echo $1
+    echo ""
     make clean
     make
     make clean
@@ -76,7 +80,6 @@ cd ..
 
 changePlatform gb-z80
 runTest background_test
-runTest library_test
 runTest linker_test
 runTest sintest
 cd ..
@@ -87,6 +90,7 @@ cd ..
 
 changePlatform huc6280
 runTest linker_test
+runTest ram_sections
 cd ..
 
 #####################################################################
@@ -108,4 +112,5 @@ runTest linker_test_2
 runTest rept_test
 runTest sdsc_test
 runTest sms_test
+runTest ram_sections
 cd ..

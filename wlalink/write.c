@@ -88,7 +88,7 @@ int insert_sections(void) {
 
   struct section *s, **sa;
   int d, f, i, x, t, q, sn, p;
-  char *ram_slots[256], *c;
+  char **ram_slots[256], *c;
 
   
   /* initialize ram slots */
@@ -98,13 +98,24 @@ int insert_sections(void) {
   /* find all touched slots */
   s = sec_first;
   while (s != NULL) {
-    if (s->status == SECTION_STATUS_RAM && ram_slots[s->slot] == NULL) {
-      ram_slots[s->slot] = malloc(slots[s->slot].size);
-      if (ram_slots[s->slot] == NULL) {
-	fprintf(stderr, "INSERT_SECTIONS: Out of memory error.\n");
-	return FAILED;
+    if (s->status == SECTION_STATUS_RAM) {
+      if (ram_slots[s->bank] == NULL) {
+	ram_slots[s->bank] = malloc(sizeof(char *) * 256);
+	if (ram_slots[s->bank] == NULL) {
+	  fprintf(stderr, "INSERT_SECTIONS: Out of memory error.\n");
+	  return FAILED;
+	}
+	for (i = 0; i < 256; i++)
+	  ram_slots[s->bank][i] = NULL;
       }
-      memset(ram_slots[s->slot], 0, slots[s->slot].size);
+      if (ram_slots[s->bank][s->slot] == NULL) {
+	ram_slots[s->bank][s->slot] = malloc(slots[s->slot].size);
+	if (ram_slots[s->bank][s->slot] == NULL) {
+	  fprintf(stderr, "INSERT_SECTIONS: Out of memory error.\n");
+	  return FAILED;
+	}
+	memset(ram_slots[s->bank][s->slot], 0, slots[s->slot].size);
+      }
     }
     s = s->next;
   }
@@ -113,7 +124,6 @@ int insert_sections(void) {
   i = 0;
   s = sec_first;
   while (s != NULL) {
-    /* no references - skip it */
     if (s->alive == YES)
       i++;
     s = s->next;
@@ -155,14 +165,23 @@ int insert_sections(void) {
 
     /* search for free space */
     if (s->status == SECTION_STATUS_RAM) {
-      c = ram_slots[s->slot];
+      int slotAddress = slots[s->slot].address;
+
+      /* align the starting address */
+      int address = slotAddress % s->alignment;
+      if (address != 0)
+	address = s->alignment - address;
+
+      c = ram_slots[s->bank][s->slot];
       i = slots[s->slot].size;
       t = 0;
-      for (x = 0; x < i; x++, c++) {
-	if (*c == 0) {
-	  for (q = 0; x < i && q < s->size; x++, q++, c++) {
-	    if (*c != 0)
+      for (; address < i; address += s->alignment) {
+	if (c[address] == 0) {
+	  for (q = 0; address + q < i && q < s->size; q++) {
+	    if (c[address + q] != 0) {
+	      address += q;
 	      break;
+	    }
 	  }
 	  if (q == s->size) {
 	    t = 1;
@@ -172,23 +191,30 @@ int insert_sections(void) {
       }
 
       if (t == 0) {
-	fprintf(stderr, "INSERT_SECTIONS: No room for RAM section \"%s\" (%d bytes) in slot %d.\n", s->name, s->size, s->slot);
+	fprintf(stderr, "INSERT_SECTIONS: No room for RAMSECTION \"%s\" (%d bytes) in slot %d.\n", s->name, s->size, s->slot);
 	return FAILED;
       }
 
+      s->address = address;
+      
       /* mark as used */
-      c = c - s->size;
-      for (i = 0; i < s->size; i++, c++)
-	*c = 1;
-
-      s->address = c - s->size - ram_slots[s->slot];
+      for (i = 0; i < s->size; i++, address++)
+	c[address] = 1;
     }
   }
 
   /* free tmp memory */
   for (i = 0; i < 256; i++) {
-    if (ram_slots[i] != NULL)
+    if (ram_slots[i] != NULL) {
+      for (p = 0; p < 256; p++) {
+	if (ram_slots[i][p] != NULL) {
+	  free(ram_slots[i][p]);
+	  ram_slots[i][p] = NULL;
+	}
+      }
       free(ram_slots[i]);
+      ram_slots[i] = NULL;
+    }
   }
 
   /* force sections */
@@ -1267,6 +1293,7 @@ int compute_stack(struct stack *sta, int *result) {
       /* we have a stack inside a stack! find the stack */
       st = stacks_first;
       while (st != NULL) {
+	/* nice hack... */
 	if (st->id == s->value && st->file_id == s->sign)
 	  break;
 	st = st->next;

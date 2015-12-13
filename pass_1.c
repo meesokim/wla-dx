@@ -524,9 +524,11 @@ int pass_1(void) {
   for (q = 0; q < 256; q++)
     slots[q].size = 0;
 
+  /* WARNING: "i" is a global variable that we use as the char index to the source file. */
+  /* Ville: this must be one of the worst programming decicions I've ever done, sorry about it... */
+  /* ... but the year was something like 1998 and I had just coded 6+ years 68k asm, and moved to C... */
+
   /* start from the very first character */
-  /* WARNING: "i" is a global var that we use as the char index to the source file */
-  /* Ville: this must be one of the worst programming decicions I've even done, sorry about it... */
   i = 0;
 
   /* output the file id */
@@ -737,8 +739,16 @@ int evaluate_token(void) {
   }
 
   /* OPCODE? */
+  {
+    int op_id = tmp[0];
+    if (op_id < 0) {
+        print_error("Invalid value\n", ERROR_LOG);
+        return FAILED;
+    }
 
-  ind = opcode_p[(unsigned int)tmp[0]];
+    ind = opcode_p[op_id];
+  }
+
   opt_tmp = &opt_table[ind];
 
   for (f = opcode_n[(unsigned int)tmp[0]]; f > 0; f--) {
@@ -977,14 +987,14 @@ int localize_path(char *path) {
     return FAILED;
 
   for (i = 0; path[i] != 0; i++) {
-#if defined(AMIGA) || defined(UNIX)
-    /* '\' -> '/' */
-    if (path[i] == '\\')
-      path[i] = '/';
-#else
+#if defined(MSDOS)
     /* '/' -> '\' */
     if (path[i] == '/')
       path[i] = '\\';
+#else
+    /* '\' -> '/' */
+    if (path[i] == '\\')
+      path[i] = '/';
 #endif
   }
 
@@ -1477,19 +1487,30 @@ int parse_directive(void) {
         break;
       }
 
-      if (!q == INPUT_NUMBER_STRING) {
-        sprintf(emsg, ".%s needs string data.\n", bak);
+      if (q == INPUT_NUMBER_STRING) {
+	/* remap the ascii string */
+	for (o = 0; o < string_size; o++) {
+	  ind = label[o];
+	  if (ind < 0)
+	    ind += 256;
+	  ind = (int)asciitable[ind];
+	  fprintf(file_out_ptr, "d%d ", ind);
+	}
+      }
+      else if (q == SUCCEEDED) {
+	/* remap the byte */
+	if (d < 0 || d > 255) {
+	  sprintf(emsg, ".%s needs string / byte (0-255) data.\n", bak);
+	  print_error(emsg, ERROR_INP);
+	  return FAILED;
+	}
+	ind = (int)asciitable[d];
+	fprintf(file_out_ptr, "d%d ", ind);
+      }
+      else {
+	sprintf(emsg, ".%s needs string / byte (0-255) data.\n", bak);
         print_error(emsg, ERROR_INP);
         return FAILED;
-      }
-
-      /* remap the data */
-      for (o = 0; o < string_size; o++) {
-        ind = label[o];
-        if (ind < 0)
-          ind += 256;
-        ind = (int)asciitable[ind];
-        fprintf(file_out_ptr, "d%d ", ind);
       }
     }
 
@@ -1576,17 +1597,17 @@ int parse_directive(void) {
       return FAILED;
     }
 
-	/* DEBUG
-	{
-		struct structure_item *sS = s->items;
+    /* DEBUG
+       {
+       struct structure_item *sS = s->items;
 		
-		fprintf(stderr, "STRUCT \"%s\" size %d\n", s->name, s->size);
-		while (sS != NULL) {
-			fprintf(stderr, "ITEM \"%s\" size %d\n", sS->name, sS->size);
-			sS = sS->next;
-		}
-	}
-	*/
+       fprintf(stderr, "STRUCT \"%s\" size %d\n", s->name, s->size);
+       while (sS != NULL) {
+       fprintf(stderr, "ITEM \"%s\" size %d\n", sS->name, sS->size);
+       sS = sS->next;
+       }
+       }
+    */
 	
     if (compare_next_token("DATA", 4) == SUCCEEDED)
       skip_next_token();
@@ -1600,11 +1621,11 @@ int parse_directive(void) {
 
       fprintf(file_out_ptr, "k%d L%s.%s ", active_file_info_last->line_current, iname, it->name);
 
-	  if (it->size <= 0) {
-		  /* don't put data into empty structure items */
-		  it = it->next;
-		  continue;
-	  }
+      if (it->size <= 0) {
+	/* don't put data into empty structure items */
+	it = it->next;
+	continue;
+      }
 	  
       /* take care of the strings */
       if (inz == INPUT_NUMBER_STRING) {
@@ -2265,6 +2286,20 @@ int parse_directive(void) {
     sec_tmp->slot = d;
     fprintf(file_out_ptr, "S%d ", sec_tmp->id);
 
+    /* align the ramsection? */
+    if (compare_next_token("ALIGN", 5) == SUCCEEDED) {
+      if (skip_next_token() == FAILED)
+        return FAILED;
+
+      inz = input_number();
+      if (inz != SUCCEEDED) {
+        print_error("Could not parse the .RAMSECTION alignment.\n", ERROR_DIR);
+        return FAILED;
+      }
+
+      sec_tmp->alignment = d;
+    }
+
     /* ram section - read labels */
     if (sec_tmp->status == SECTION_STATUS_RAM) {
       while ((t = get_next_token()) != FAILED) {
@@ -2506,7 +2541,7 @@ int parse_directive(void) {
     /* the size of the section? */
     if (compare_next_token("SIZE", 4) == SUCCEEDED) {
       if (sec_tmp->maxsize_status == ON) {
-        print_error("The size of the section has already been defined.\n", ERROR_DIR);
+        print_error("The SIZE of the section has already been defined.\n", ERROR_DIR);
         return FAILED;
       }
 
@@ -2515,7 +2550,7 @@ int parse_directive(void) {
 
       inz = input_number();
       if (inz != SUCCEEDED) {
-        print_error("Could not parse the size.\n", ERROR_DIR);
+        print_error("Could not parse the SIZE.\n", ERROR_DIR);
         return FAILED;
       }
 
@@ -2530,7 +2565,7 @@ int parse_directive(void) {
 
       inz = input_number();
       if (inz != SUCCEEDED) {
-        print_error("Could not parse the section alignment.\n", ERROR_DIR);
+        print_error("Could not parse the .SECTION alignment.\n", ERROR_DIR);
         return FAILED;
       }
 
@@ -3141,6 +3176,8 @@ int parse_directive(void) {
     }
 
     block_status++;
+
+    fprintf(file_out_ptr, "k%d ", active_file_info_last->line_current);
     fprintf(file_out_ptr, "g%s ", tmp);
 
     return SUCCEEDED;
@@ -4173,7 +4210,7 @@ int parse_directive(void) {
         strcmp(tmp, "NARGS") == 0 || strcmp(tmp, "nargs") == 0 ||
         strcmp(tmp, "CADDR") == 0 || strcmp(tmp, "caddr") == 0) {
 
-      sprintf(emsg, "\"%s\" is a reserved definition label and is not user definiable.\n", tmp);
+      sprintf(emsg, "\"%s\" is a reserved definition label and is not user definable.\n", tmp);
       print_error(emsg, ERROR_DIR);
       return FAILED;
     }
@@ -4323,7 +4360,7 @@ int parse_directive(void) {
         strcmp(tmp, "NARGS") == 0 || strcmp(tmp, "nargs") == 0 ||
         strcmp(tmp, "CADDR") == 0 || strcmp(tmp, "caddr") == 0) {
 
-      sprintf(emsg, "\"%s\" is a reserved definition label and is not user definiable.\n", tmp);
+      sprintf(emsg, "\"%s\" is a reserved definition label and is not user definable.\n", tmp);
       print_error(emsg, ERROR_DIR);
       return FAILED;
     }
@@ -6452,7 +6489,7 @@ int parse_directive(void) {
 
   if (strcmp(cp, "ENDASM") == 0) {
 
-    int asm = 1, x;
+    int endasm = 1, x;
 
 
     while (1) {
@@ -6467,12 +6504,12 @@ int parse_directive(void) {
         return SUCCEEDED;
       }
       if (strcaselesscmp(tmp, ".ASM") == 0) {
-        asm--;
-        if (asm == 0)
+        endasm--;
+        if (endasm == 0)
           return SUCCEEDED;
       }
       if (strcaselesscmp(tmp, ".ENDASM") == 0)
-        asm++;
+        endasm++;
     }
   }
 
