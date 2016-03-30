@@ -1,6 +1,20 @@
 # Main CMakeLists file
 cmake_minimum_required (VERSION 2.8.9)
 
+
+
+# NOTE! UNCOMMENT THESE TO GENERATE EXECUTABLES THAT ARE SUITABLE FOR gdb DEBUGGING!
+#set(CMAKE_C_FLAGS "-O0 -ggdb")
+#set(CMAKE_C_FLAGS_RELEASE "-O0 -ggdb")
+
+# NOTE! UNCOMMENT THIS TO MAKE WLALINK OUTPUT LOTS OF DEBUG INFORMATION TO sdtout
+#add_definitions( -DWLALINK_DEBUG )
+
+# NOTE! UNCOMMENT THIS TO MAKE WLA OUTPUT LOTS OF DEBUG INFORMATION TO sdtout
+#add_definitions( -DWLA_DEBUG )
+
+
+
 # --- Project name ---
 project (WLA-DX)
 
@@ -62,7 +76,7 @@ add_subdirectory (wlab)
 add_subdirectory (wlalink)
 
 # --- WLA executables ---
-set(CFILES main.c parse.c include_file.c pass_1.c pass_2.c pass_3.c pass_4.c stack.c listfile.c)
+set(CFILES main.c hashmap.c parse.c include_file.c pass_1.c pass_2.c pass_3.c pass_4.c stack.c listfile.c)
 
 # GB
 add_executable(wla-gb ${CFILES})

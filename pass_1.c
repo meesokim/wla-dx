@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 #include <math.h>
 #include <time.h>
 
@@ -18,9 +19,12 @@
 
 #ifdef GB
 char licenseecodenew_c1, licenseecodenew_c2;
+int gbheader_defined = 0;
+int nintendologo_defined = 0;
 int computechecksum_defined = 0, computecomplementcheck_defined = 0;
 int romgbc = 0, romdmg = 0, romsgb = 0;
 int cartridgetype = 0, cartridgetype_defined = 0;
+int countrycode = 0, countrycode_defined = 0;
 int licenseecodenew_defined = 0, licenseecodeold = 0, licenseecodeold_defined = 0;
 #endif
 
@@ -87,7 +91,8 @@ unsigned char *rom_banks = NULL, *rom_banks_usage_table = NULL;
 
 struct export_def *export_first = NULL, *export_last = NULL;
 struct optcode *opt_tmp;
-struct definition *defines = NULL, *tmp_def, *next_def;
+struct definition *tmp_def;
+struct map_t *defines_map = NULL;
 struct macro_static *macros_first = NULL, *macros_last;
 struct section_def *sections_first = NULL, *sections_last = NULL, *sec_tmp, *sec_next;
 struct macro_runtime *macro_stack = NULL, *macro_runtime_current = NULL;
@@ -95,6 +100,7 @@ struct repeat_runtime *repeat_stack = NULL;
 struct slot slots[256];
 struct structure *structures_first = NULL;
 struct filepointer *filepointers = NULL;
+struct map_t *namespace_map = NULL;
 
 extern char *buffer, *unfolded_buffer, label[MAX_NAME_LENGTH], *include_dir, *full_name;
 extern int size, unfolded_size, input_number_error_msg, verbose_mode, output_format, open_files;
@@ -412,12 +418,8 @@ int macro_insert_byte_db(char *name) {
   struct definition *d;
 
   
-  d = defines;
-  while (d != NULL) {
-    if (strcmp(d->alias, "_out") == 0 || strcmp(d->alias, "_OUT") == 0)
-      break;
-    d = d->next;
-  }
+  if (hashmap_get(defines_map, "_out", (void*)&d) != MAP_OK)
+      hashmap_get(defines_map, "_OUT", (void*)&d);
 
   if (d == NULL) {
     sprintf(emsg, "No \"_OUT/_out\" defined, .%s takes its output from there.\n", name);
@@ -427,7 +429,7 @@ int macro_insert_byte_db(char *name) {
 
   if (d->type == DEFINITION_TYPE_VALUE) {
     if (d->value < -127 || d->value > 255) {
-      sprintf(emsg, ".%s expects 8bit data, %d is out of range!\n", name, (int)d->value);
+      sprintf(emsg, ".%s expects 8-bit data, %d is out of range!\n", name, (int)d->value);
       print_error(emsg, ERROR_DIR);
       return FAILED;
     }
@@ -457,12 +459,8 @@ int macro_insert_word_db(char *name) {
   struct definition *d;
 
   
-  d = defines;
-  while (d != NULL) {
-    if (strcmp(d->alias, "_out") == 0 || strcmp(d->alias, "_OUT") == 0)
-      break;
-    d = d->next;
-  }
+  if (hashmap_get(defines_map, "_out", (void*)&d) != MAP_OK)
+      hashmap_get(defines_map, "_OUT", (void*)&d);
 
   if (d == NULL) {
     sprintf(emsg, "No \"_OUT/_out\" defined, .%s takes its output from there.\n", name);
@@ -472,7 +470,7 @@ int macro_insert_word_db(char *name) {
 
   if (d->type == DEFINITION_TYPE_VALUE) {
     if (d->value < -32768 || d->value > 65535) {
-      sprintf(emsg, ".%s expects 16bit data, %d is out of range!\n", name, (int)d->value);
+      sprintf(emsg, ".%s expects 16-bit data, %d is out of range!\n", name, (int)d->value);
       print_error(emsg, ERROR_DIR);
       return FAILED;
     }
@@ -683,6 +681,29 @@ int pass_1(void) {
 }
 
 
+void output_assembled_opcode(struct optcode *oc, const char *format, ...) {
+
+  va_list ap;
+
+  if (oc == NULL)
+    return;
+  
+  va_start(ap, format);
+
+  vfprintf(file_out_ptr, format, ap);
+#if WLA_DEBUG
+  {
+    char ttt[64];
+
+    vsprintf(ttt, format, ap);
+    printf("LINE %5d: OPCODE: %16s ::: %s\n", active_file_info_last->line_current, oc->op, ttt);
+  }
+#endif
+
+  va_end(ap);
+}
+
+
 int evaluate_token(void) {
 
   int f, z = 0, x, y;
@@ -755,9 +776,9 @@ int evaluate_token(void) {
     for (inz = 0, d = SUCCEEDED; inz < OP_SIZE_MAX; inz++) {
       if (tmp[inz] == 0 && opt_tmp->op[inz] == 0 && buffer[i] == 0x0A) {
         if (opt_tmp->type == 0)
-          fprintf(file_out_ptr, "d%d ", opt_tmp->hex);
+          output_assembled_opcode(opt_tmp, "d%d ", opt_tmp->hex);
         else
-          fprintf(file_out_ptr, "y%d ", opt_tmp->hex);
+          output_assembled_opcode(opt_tmp, "y%d ", opt_tmp->hex);
         return SUCCEEDED;
       }
       if (tmp[inz] == 0 && opt_tmp->op[inz] == ' ' && buffer[i] == ' ')
@@ -873,12 +894,7 @@ int redefine(char *name, double value, char *string, int type, int size) {
   struct definition *d;
 
   
-  d = defines;
-  while (d != NULL) {
-    if (strcmp(d->alias, name) == 0)
-      break;
-    d = d->next;
-  }
+  hashmap_get(defines_map, name, (void*)&d);
 
   /* it wasn't defined previously */
   if (d == NULL) {
@@ -903,46 +919,32 @@ int redefine(char *name, double value, char *string, int type, int size) {
 
 int undefine(char *name) {
 
-  struct definition *d, *p;
+  struct definition *d;
 
-  
-  d = defines;
-  p = NULL;
-  while (d != NULL) {
-    if (strcmp(name, d->alias) == 0) {
-      if (p != NULL)
-        p->next = d->next;
-      else
-        defines = d->next;
-      free(d);
-      return SUCCEEDED;
-    }
-    p = d;
-    d = d->next;
-  }
+  if (hashmap_get(defines_map, name, (void*)&d) != MAP_OK)
+      return FAILED;
 
-  return FAILED;
+  hashmap_remove(defines_map, name);
+
+  free(d);
+  return SUCCEEDED;
 }
 
 
 int add_a_new_definition(char *name, double value, char *string, int type, int size) {
 
-  struct definition *d, *l;
+  struct definition *d;
+  int err;
 
   
-  l = NULL;
-  d = defines;
-  while (d != NULL) {
-    l = d;
-    if (strcmp(name, d->alias) == 0) {
-      sprintf(emsg, "\"%s\" was defined for the second time.\n", name);
-      if (commandline_parsing == OFF)
-        print_error(emsg, ERROR_DIR);
-      else
-        fprintf(stderr, "ADD_A_NEW_DEFINITION: %s", emsg);
-      return FAILED;
-    }
-    d = d->next;
+  hashmap_get(defines_map, name, (void*)&d);
+  if (d != NULL) {
+    sprintf(emsg, "\"%s\" was defined for the second time.\n", name);
+    if (commandline_parsing == OFF)
+      print_error(emsg, ERROR_DIR);
+    else
+      fprintf(stderr, "ADD_A_NEW_DEFINITION: %s", emsg);
+    return FAILED;
   }
 
   d = malloc(sizeof(struct definition));
@@ -955,14 +957,13 @@ int add_a_new_definition(char *name, double value, char *string, int type, int s
     return FAILED;
   }
 
-  if (defines == NULL)
-    defines = d;
-  else
-    l->next = d;
-
   strcpy(d->alias, name);
-  d->next = NULL;
   d->type = type;
+
+  if ((err = hashmap_put(defines_map, d->alias, d)) != MAP_OK) {
+      fprintf(stderr, "ADD_A_NEW_DEFINITION: Hashmap error %d\n", err);
+      return FAILED;
+  }
 
   if (type == DEFINITION_TYPE_VALUE)
     d->value = value;
@@ -1082,7 +1083,7 @@ int parse_directive(void) {
   
   /* ORG */
 
-  if (strcmp(cp, "ORG") == 0) {
+  if (strcaselesscmp(cp, "ORG") == 0) {
     if (output_format == OUTPUT_LIBRARY) {
       print_error("Library files don't take .ORG definitions.\n", ERROR_DIR);
       return FAILED;
@@ -1113,7 +1114,7 @@ int parse_directive(void) {
 
   /* ORGA */
 
-  if (strcmp(cp, "ORGA") == 0) {
+  if (strcaselesscmp(cp, "ORGA") == 0) {
     if (output_format == OUTPUT_LIBRARY) {
       print_error("Library files don't take .ORGA definitions.\n", ERROR_DIR);
       return FAILED;
@@ -1152,7 +1153,7 @@ int parse_directive(void) {
 
   /* SLOT */
 
-  if (strcmp(cp, "SLOT") == 0) {
+  if (strcaselesscmp(cp, "SLOT") == 0) {
     if (output_format == OUTPUT_LIBRARY) {
       print_error("Library files don't take .SLOT definitions.\n", ERROR_DIR);
       return FAILED;
@@ -1187,7 +1188,7 @@ int parse_directive(void) {
 
   /* BANK */
 
-  if (strcmp(cp, "BANK") == 0) {
+  if (strcaselesscmp(cp, "BANK") == 0) {
     if (output_format == OUTPUT_LIBRARY) {
       print_error("Library files don't take .BANK definitions.\n", ERROR_DIR);
       return FAILED;
@@ -1228,7 +1229,7 @@ int parse_directive(void) {
       if (q == FAILED)
         return FAILED;
       if (q != SUCCEEDED || d > 255 || d < 0) {
-        print_error("SLOT needs an unsigned 8bit value as an ID.\n", ERROR_DIR);
+        print_error("SLOT needs an unsigned 8-bit value as an ID.\n", ERROR_DIR);
         return FAILED;
       }
 
@@ -1267,7 +1268,7 @@ int parse_directive(void) {
 
   /* DBM/DWM? */
 
-  if (strcmp(cp, "DBM") == 0 || strcmp(cp, "DWM") == 0) {
+  if (strcaselesscmp(cp, "DBM") == 0 || strcaselesscmp(cp, "DWM") == 0) {
 
     struct macro_static *m;
 
@@ -1288,7 +1289,7 @@ int parse_directive(void) {
       return FAILED;
     }
 
-    if (strcmp(cp, "DBM") == 0) {
+    if (strcaselesscmp(cp, "DBM") == 0) {
       if (macro_start_dxm(m, MACRO_CALLER_DBM, cp, YES) == FAILED)
         return FAILED;
     }
@@ -1302,20 +1303,67 @@ int parse_directive(void) {
 
   /* DB/BYT/BYTE? */
 
-  if (strcmp(cp, "DB") == 0 || strcmp(cp, "BYT") == 0 || strcmp(cp, "BYTE") == 0) {
+  if (strcaselesscmp(cp, "DB") == 0 || strcaselesscmp(cp, "BYT") == 0 || strcaselesscmp(cp, "BYTE") == 0) {
     strcpy(bak, cp);
 
     inz = input_number();
     for (ind = 0; inz == SUCCEEDED || inz == INPUT_NUMBER_STRING || inz == INPUT_NUMBER_ADDRESS_LABEL || inz == INPUT_NUMBER_STACK; ind++) {
       if (inz == INPUT_NUMBER_STRING) {
-        for (o = 0; o < string_size; o++)
-          fprintf(file_out_ptr, "d%d ", (int)label[o]);
+	for (o = 0; o < string_size; o++) {
+	  /* handle '\0' */
+	  if (label[o] == '\\' && label[o + 1] == '0') {
+	    fprintf(file_out_ptr, "d%d ", '\0');
+	    o++;
+	  }
+	  /* handle '\x' */
+	  else if (label[o] == '\\' && label[o + 1] == 'x') {
+	    char tmp_a[2], *tmp_b;
+	    int tmp_c;
+	    
+	    o += 3;
+	    sprintf(tmp_a, "%c%c", label[o-1], label[o]);
+	    tmp_c = strtol(tmp_a, &tmp_b, 16);
+	    if (*tmp_b) {
+	      sprintf(emsg, ".%s '\\x' needs hexadecimal byte (00-FF) data.\n", bak);
+	      print_error(emsg, ERROR_INP);
+	      return FAILED;
+	    }
+	    fprintf(file_out_ptr, "d%d ", tmp_c);
+	  }
+	  /* handle '\<' */
+	  else if (label[o] == '\\' && label[o + 1] == '<') {
+	    o += 2;
+	    if (o == string_size) {
+	      sprintf(emsg, ".%s '\\<' needs character data.\n", bak);
+	      print_error(emsg, ERROR_INP);
+	      return FAILED;
+	    }
+	    fprintf(file_out_ptr, "d%d ", (int)label[o]|0x80);
+	  }
+	  /* handle '\>' */
+	  else if (label[o] == '\\' && label[o + 1] == '>' && o == 0) {
+	    sprintf(emsg, ".%s '\\>' needs character data.\n", bak);
+	    print_error(emsg, ERROR_INP);
+	    return FAILED;
+	  }
+	  else if (label[o + 1] == '\\' && label[o + 2] == '>') {
+	    fprintf(file_out_ptr, "d%d ", (int)label[o]|0x80);
+	    o += 2;
+	  }
+	  /* handle '\\' */
+	  else if (label[o] == '\\' && label[o + 1] == '\\') {
+	    fprintf(file_out_ptr, "d%d ", '\\');
+	    o++;
+	  }
+	  else
+	    fprintf(file_out_ptr, "d%d ", (int)label[o]);
+	}
         inz = input_number();
         continue;
       }
 
       if (inz == SUCCEEDED && (d < -127 || d > 255)) {
-        sprintf(emsg, ".%s expects 8bit data, %d is out of range!\n", bak, d);
+        sprintf(emsg, ".%s expects 8-bit data, %d is out of range!\n", bak, d);
         print_error(emsg, ERROR_DIR);
         return FAILED;
       }
@@ -1347,7 +1395,7 @@ int parse_directive(void) {
 
   /* ASCTABLE/ASCIITABLE? */
 
-  if (strcmp(cp, "ASCTABLE") == 0 || strcmp(cp, "ASCIITABLE") == 0) {
+  if (strcaselesscmp(cp, "ASCTABLE") == 0 || strcaselesscmp(cp, "ASCIITABLE") == 0) {
 
     int astart, aend;
 
@@ -1372,12 +1420,12 @@ int parse_directive(void) {
         if (q == FAILED)
           return FAILED;
         if (q == SUCCEEDED && (d < 0 || d > 255)) {
-          print_error("The entry must be a positive 8bit immediate value or one letter string.\n", ERROR_DIR);
+          print_error("The entry must be a positive 8-bit immediate value or one letter string.\n", ERROR_DIR);
           return FAILED;
         }
         if (q == INPUT_NUMBER_STRING) {
           if (string_size != 1) {
-            print_error("The entry must be a positive 8bit immediate value or one letter string.\n", ERROR_DIR);
+            print_error("The entry must be a positive 8-bit immediate value or one letter string.\n", ERROR_DIR);
             return FAILED;
           }
           else {
@@ -1399,12 +1447,12 @@ int parse_directive(void) {
           if (q == FAILED)
             return FAILED;
           if (q == SUCCEEDED && (d < 0 || d > 255)) {
-            print_error("The entry must be a positive 8bit immediate value or one letter string.\n", ERROR_DIR);
+            print_error("The entry must be a positive 8-bit immediate value or one letter string.\n", ERROR_DIR);
             return FAILED;
           }
           if (q == INPUT_NUMBER_STRING) {
             if (string_size != 1) {
-              print_error("The entry must be a positive 8bit immediate value or one letter string.\n", ERROR_DIR);
+              print_error("The entry must be a positive 8-bit immediate value or one letter string.\n", ERROR_DIR);
               return FAILED;
             }
             else {
@@ -1435,11 +1483,11 @@ int parse_directive(void) {
         if (q == FAILED)
           return FAILED;
         if (q == SUCCEEDED && (d < 0 || d > 255)) {
-          print_error("The entry must be a positive 8bit immediate value or one letter string.\n", ERROR_DIR);
+          print_error("The entry must be a positive 8-bit immediate value or one letter string.\n", ERROR_DIR);
           return FAILED;
         }
         if (q != SUCCEEDED) {
-          print_error("The entry must be a positive 8bit immediate value.\n", ERROR_DIR);
+          print_error("The entry must be a positive 8-bit immediate value.\n", ERROR_DIR);
           return FAILED;
         }
 
@@ -1471,7 +1519,7 @@ int parse_directive(void) {
 
   /* ASC? */
 
-  if (strcmp(cp, "ASC") == 0) {
+  if (strcaselesscmp(cp, "ASC") == 0) {
     strcpy(bak, cp);
 
     if (asciitable_defined == 0) {
@@ -1491,10 +1539,61 @@ int parse_directive(void) {
 	/* remap the ascii string */
 	for (o = 0; o < string_size; o++) {
 	  ind = label[o];
-	  if (ind < 0)
-	    ind += 256;
-	  ind = (int)asciitable[ind];
-	  fprintf(file_out_ptr, "d%d ", ind);
+	  /* handle '\0' */
+	  if (label[o] == '\\' && label[o + 1] == '0') {
+	    ind = '\0';
+	    fprintf(file_out_ptr, "d%d ", ind);
+	    o++;
+	  }
+	  /* handle '\x' */
+	  else if (label[o] == '\\' && label[o + 1] == 'x') {
+	    char tmp_a[2], *tmp_b;
+	    int tmp_c;
+	    
+	    o += 3;
+	    sprintf(tmp_a, "%c%c", label[o-1], label[o]);
+	    tmp_c = strtol(tmp_a, &tmp_b, 16);
+	    if (*tmp_b) {
+	      sprintf(emsg, ".%s '\\x' needs hexadecimal byte (00-FF) data.\n", bak);
+	      print_error(emsg, ERROR_INP);
+	      return FAILED;
+	    }
+	    ind = tmp_c;
+	    fprintf(file_out_ptr, "d%d ", ind);
+	  }
+	  else {
+	    int tmp_a = 0;
+	    /* handle '\<' */
+	    if (label[o] == '\\' && label[o + 1] == '<') {
+	      o += 2;
+	      if (o == string_size) {
+	        sprintf(emsg, ".%s '\\<' needs character data.\n", bak);
+	        print_error(emsg, ERROR_INP);
+	        return FAILED;
+	      }
+	      tmp_a = 0x80;
+	      ind = label[o];
+	    }
+	    /* handle '\>' */
+	    else if (label[o] == '\\' && label[o + 1] == '>' && o == 0) {
+	      sprintf(emsg, ".%s '\\>' needs character data.\n", bak);
+	      print_error(emsg, ERROR_INP);
+	      return FAILED;
+	    }
+	    else if (label[o + 1] == '\\' && label[o + 2] == '>') {
+	      tmp_a = 0x80;
+	      o += 2;
+	    }
+	    /* handle '\\' */
+	    else if (label[o] == '\\' && label[o + 1] == '\\') {
+	      ind = '\\';
+	      o++;
+	    }
+	    if (ind < 0)
+	      ind += 256;
+	    ind = (int)asciitable[ind];
+	    fprintf(file_out_ptr, "d%d ", ind|tmp_a);
+	  }
 	}
       }
       else if (q == SUCCEEDED) {
@@ -1519,13 +1618,13 @@ int parse_directive(void) {
 
   /* DW/WORD? */
 
-  if (strcmp(cp, "DW") == 0 || strcmp(cp, "WORD") == 0) {
+  if (strcaselesscmp(cp, "DW") == 0 || strcaselesscmp(cp, "WORD") == 0) {
     strcpy(bak, cp);
 
     inz = input_number();
     for (ind = 0; inz == SUCCEEDED || inz == INPUT_NUMBER_ADDRESS_LABEL || inz == INPUT_NUMBER_STACK; ind++) {
       if (inz == SUCCEEDED && (d < -32768 || d > 65535)) {
-        sprintf(emsg, ".%s expects 16bit data, %d is out of range!\n", bak, d);
+        sprintf(emsg, ".%s expects 16-bit data, %d is out of range!\n", bak, d);
         print_error(emsg, ERROR_DIR);
         return FAILED;
       }
@@ -1555,9 +1654,49 @@ int parse_directive(void) {
     return SUCCEEDED;
   }
 
+#ifdef W65816
+  /* DL/LONG? */
+
+  if (strcmp(cp, "DL") == 0 || strcmp(cp, "LONG") == 0) {
+    strcpy(bak, cp);
+
+    inz = input_number();
+    for (ind = 0; inz == SUCCEEDED || inz == INPUT_NUMBER_ADDRESS_LABEL || inz == INPUT_NUMBER_STACK; ind++) {
+      if (inz == SUCCEEDED && (d < -8388608 || d > 16777215)) {
+        sprintf(emsg, ".%s expects 24-bit data, %d is out of range!\n", bak, d);
+        print_error(emsg, ERROR_DIR);
+        return FAILED;
+      }
+
+      if (inz == SUCCEEDED)
+        fprintf(file_out_ptr, "z%d ", d);
+      else if (inz == INPUT_NUMBER_ADDRESS_LABEL)
+        fprintf(file_out_ptr, "k%d q%s ", active_file_info_last->line_current, label);
+      else if (inz == INPUT_NUMBER_STACK)
+        fprintf(file_out_ptr, "T%d ", latest_stack);
+
+      inz = input_number();
+    }
+
+    if (inz == FAILED)
+      return FAILED;
+
+    if ((inz == INPUT_NUMBER_EOL || inz == INPUT_NUMBER_STRING) && ind == 0) {
+      sprintf(emsg, ".%s needs data.\n", bak);
+      print_error(emsg, ERROR_INP);
+      return FAILED;
+    }
+
+    if (inz == INPUT_NUMBER_EOL)
+      next_line();
+
+    return SUCCEEDED;
+  }
+#endif
+
   /* DSTRUCT */
 
-  if (strcmp(cp, "DSTRUCT") == 0) {
+  if (strcaselesscmp(cp, "DSTRUCT") == 0) {
 
     struct structure_item *it;
     struct structure *s;
@@ -1645,7 +1784,7 @@ int parse_directive(void) {
       else {
         if (it->size == 1) {
           if ((inz == SUCCEEDED) && (d < -127 || d > 255)) {
-            sprintf(emsg, "\"%s.%s\" expects 8bit data, %d is out of range!\n", s->name, it->name, d);
+            sprintf(emsg, "\"%s.%s\" expects 8-bit data, %d is out of range!\n", s->name, it->name, d);
             print_error(emsg, ERROR_DIR);
             return FAILED;
           }
@@ -1661,7 +1800,7 @@ int parse_directive(void) {
         }
         else {
           if (inz == SUCCEEDED && (d < -32768 || d > 65535)) {
-            sprintf(emsg, "\"%s.%s\" expects 16bit data, %d is out of range!\n", s->name, it->name, d);
+            sprintf(emsg, "\"%s.%s\" expects 16-bit data, %d is out of range!\n", s->name, it->name, d);
             print_error(emsg, ERROR_DIR);
             return FAILED;
           }
@@ -1716,7 +1855,7 @@ int parse_directive(void) {
 
   /* DS/DSB? */
 
-  if (strcmp(cp, "DSB") == 0 || strcmp(cp, "DS") == 0) {
+  if (strcaselesscmp(cp, "DSB") == 0 || strcaselesscmp(cp, "DS") == 0) {
     strcpy(bak, cp);
 
     q = input_number();
@@ -1729,7 +1868,7 @@ int parse_directive(void) {
     }
 
     if (d < 1 || d > 65535) {
-      sprintf(emsg, ".%s expects a 16bit positive integer as size, %d is out of range!\n", bak, d);
+      sprintf(emsg, ".%s expects a 16-bit positive integer as size, %d is out of range!\n", bak, d);
       print_error(emsg, ERROR_DIR);
       return FAILED;
     }
@@ -1746,7 +1885,7 @@ int parse_directive(void) {
     }
 
     if (q == SUCCEEDED && (d > 255 || d < -127)) {
-      sprintf(emsg, ".%s expects 8bit data, %d is out of range!\n", bak, d);
+      sprintf(emsg, ".%s expects 8-bit data, %d is out of range!\n", bak, d);
       print_error(emsg, ERROR_DIR);
       return FAILED;
     }
@@ -1768,7 +1907,7 @@ int parse_directive(void) {
 
   /* DSW? */
 
-  if (strcmp(cp, "DSW") == 0) {
+  if (strcaselesscmp(cp, "DSW") == 0) {
     q = input_number();
     if (q == FAILED)
       return FAILED;
@@ -1778,7 +1917,7 @@ int parse_directive(void) {
     }
 
     if (d < 1 || d > 65535) {
-      sprintf(emsg, ".DSW expects a 16bit positive integer as size, %d is out of range!\n", d);
+      sprintf(emsg, ".DSW expects a 16-bit positive integer as size, %d is out of range!\n", d);
       print_error(emsg, ERROR_DIR);
       return FAILED;
     }
@@ -1794,7 +1933,7 @@ int parse_directive(void) {
     }
 
     if (q == SUCCEEDED && (d < -32768 || d > 65535)) {
-      sprintf(emsg, ".DSW expects 16bit data, %d is out of range!\n", d);
+      sprintf(emsg, ".DSW expects 16-bit data, %d is out of range!\n", d);
       print_error(emsg, ERROR_DIR);
       return FAILED;
     }
@@ -1816,7 +1955,7 @@ int parse_directive(void) {
 
   /* INCDIR */
 
-  if (strcmp(cp, "INCDIR") == 0) {
+  if (strcaselesscmp(cp, "INCDIR") == 0) {
 
     char *c;
 
@@ -1870,7 +2009,7 @@ int parse_directive(void) {
 
   /* INCLUDE */
 
-  if (strcmp(cp, "INCLUDE") == 0) {
+  if (strcaselesscmp(cp, "INCLUDE") == 0) {
     o = input_number();
     if (o != INPUT_NUMBER_STRING) {
       print_error(".INCLUDE needs a file name string.\n", ERROR_DIR);
@@ -1894,7 +2033,7 @@ int parse_directive(void) {
 
   /* INCBIN */
 
-  if (strcmp(cp, "INCBIN") == 0) {
+  if (strcaselesscmp(cp, "INCBIN") == 0) {
 
     struct macro_static *m;
     int s, r, j;
@@ -1949,7 +2088,7 @@ int parse_directive(void) {
 
   /* OUTNAME */
 
-  if (strcmp(cp, "OUTNAME") == 0) {
+  if (strcaselesscmp(cp, "OUTNAME") == 0) {
 
     inz = input_number();
 
@@ -1965,7 +2104,7 @@ int parse_directive(void) {
 
   /* STRUCT */
 
-  if (strcmp(cp, "STRUCT") == 0) {
+  if (strcaselesscmp(cp, "STRUCT") == 0) {
 
     struct structure_item *si, *ss, *sl = NULL;
     struct structure *st;
@@ -2173,7 +2312,7 @@ int parse_directive(void) {
 
   /* RAMSECTION */
 
-  if (strcmp(cp, "RAMSECTION") == 0) {
+  if (strcaselesscmp(cp, "RAMSECTION") == 0) {
 
     char namebak[256];
 
@@ -2209,6 +2348,7 @@ int parse_directive(void) {
     sec_tmp->id = section_id;
     sec_tmp->alignment = 1;
     sec_tmp->advance_org = YES;
+    sec_tmp->nspace = NULL;
     section_id++;
 
     strcpy(sec_tmp->name, tmp);
@@ -2218,13 +2358,15 @@ int parse_directive(void) {
     sec_next = sections_first;
     while (sec_next != NULL) {
       if (strcmp(sec_next->name, tmp) == 0) {
-        sprintf(emsg, "SECTION \"%s\" was defined for the second time.\n", tmp);
+        sprintf(emsg, "RAMSECTION \"%s\" was defined for the second time.\n", tmp);
         print_error(emsg, ERROR_DIR);
         free(sec_tmp);
         return FAILED;
       }
       sec_next = sec_next->next;
     }
+
+    sec_tmp->label_map = hashmap_new();
 
     if (sections_first == NULL) {
       sections_first = sec_tmp;
@@ -2273,7 +2415,7 @@ int parse_directive(void) {
     if (q == FAILED)
       return FAILED;
     if (q != SUCCEEDED || d > 255 || d < 0) {
-      print_error(".RAMSECTION needs an unsigned 8bit value as the SLOT number.\n", ERROR_DIR);
+      print_error(".RAMSECTION needs an unsigned 8-bit value as the SLOT number.\n", ERROR_DIR);
       return FAILED;
     }
 
@@ -2417,7 +2559,7 @@ int parse_directive(void) {
 
   /* SECTION */
 
-  if (strcmp(cp, "SECTION") == 0) {
+  if (strcaselesscmp(cp, "SECTION") == 0) {
 
     int l, m;
 
@@ -2457,6 +2599,7 @@ int parse_directive(void) {
     sec_tmp->data = NULL;
     sec_tmp->alignment = 1;
     sec_tmp->advance_org = YES;
+    sec_tmp->nspace = NULL;
 
     /* check if the section size is supplied inside the name */
     l = strlen(tmp) - 1;
@@ -2508,6 +2651,7 @@ int parse_directive(void) {
         if (strcmp(sec_next->name, tmp) == 0 && sec_next->bank == bank) {
           sprintf(emsg, "BANKHEADER section was defined for the second time for bank %d.\n", bank);
           print_error(emsg, ERROR_DIR);
+          free(sec_tmp);
           return FAILED;
         }
         sec_next = sec_next->next;
@@ -2529,6 +2673,8 @@ int parse_directive(void) {
     strcpy(sec_tmp->name, tmp);
     sec_tmp->next = NULL;
 
+    sec_tmp->label_map = hashmap_new();
+
     if (sections_first == NULL) {
       sections_first = sec_tmp;
       sections_last = sec_tmp;
@@ -2536,6 +2682,42 @@ int parse_directive(void) {
     else {
       sections_last->next = sec_tmp;
       sections_last = sec_tmp;
+    }
+
+    if (compare_next_token("NAMESPACE", 9) == SUCCEEDED) {
+      struct namespace_def *nspace;
+
+      if (skip_next_token() == FAILED)
+        return FAILED;
+
+      /* get the name */
+      if (input_next_string() == FAILED)
+        return FAILED;
+      if (tmp[0] == '\"' && tmp[strlen(tmp)-1] == '\"') {
+	l = 0;
+	while (tmp[l+1] != '\"') {
+	  tmp[l] = tmp[l+1];
+	  l++;
+	}
+	tmp[l] = 0;
+      }
+
+      hashmap_get(namespace_map, tmp, (void*)&nspace);
+      if (nspace == NULL) {
+        nspace = calloc(1, sizeof(struct namespace_def));
+        if (nspace == NULL) {
+          print_error("Out of memory error.\n", ERROR_DIR);
+          return FAILED;
+        }
+        strcpy(nspace->name, tmp);
+        if (hashmap_put(namespace_map, nspace->name, nspace) != MAP_OK) {
+          print_error("Namespace hashmap error.\n", ERROR_DIR);
+          return FAILED;
+        }
+      }
+
+      nspace->label_map = hashmap_new();
+      sec_tmp->nspace = nspace;
     }
 
     /* the size of the section? */
@@ -2649,7 +2831,7 @@ int parse_directive(void) {
 
   /* ELSE */
 
-  if (strcmp(cp, "ELSE") == 0) {
+  if (strcaselesscmp(cp, "ELSE") == 0) {
 
     int m, r;
 
@@ -2666,13 +2848,13 @@ int parse_directive(void) {
     macro_active = 0;
     while (get_next_token() != FAILED) {
       if (tmp[0] == '.') {
-        if (strcmp(cp, "ENDIF") == 0)
+        if (strcaselesscmp(cp, "ENDIF") == 0)
           r--;
-        if (strcmp(cp, "E") == 0)
+        if (strcaselesscmp(cp, "E") == 0)
           break;
-        if (strcmp(cp, "IFDEF") == 0 || strcmp(cp, "IFNDEF") == 0 || strcmp(cp, "IFGR") == 0 || strcmp(cp, "IFLE") == 0 || strcmp(cp, "IFEQ") == 0 ||
-            strcmp(cp, "IFNEQ") == 0 || strcmp(cp, "IFDEFM") == 0 || strcmp(cp, "IFNDEFM") == 0 || strcmp(cp, "IF") == 0 || strcmp(cp, "IFEXISTS") == 0 ||
-            strcmp(cp, "IFGREQ") == 0 || strcmp(cp, "IFLEEQ") == 0)
+        if (strcaselesscmp(cp, "IFDEF") == 0 || strcaselesscmp(cp, "IFNDEF") == 0 || strcaselesscmp(cp, "IFGR") == 0 || strcaselesscmp(cp, "IFLE") == 0 || strcaselesscmp(cp, "IFEQ") == 0 ||
+            strcaselesscmp(cp, "IFNEQ") == 0 || strcaselesscmp(cp, "IFDEFM") == 0 || strcaselesscmp(cp, "IFNDEFM") == 0 || strcaselesscmp(cp, "IF") == 0 || strcaselesscmp(cp, "IFEXISTS") == 0 ||
+            strcaselesscmp(cp, "IFGREQ") == 0 || strcaselesscmp(cp, "IFLEEQ") == 0)
           r++;
       }
       if (r == 0) {
@@ -2688,7 +2870,7 @@ int parse_directive(void) {
 
   /* ENDIF */
 
-  if (strcmp(cp, "ENDIF") == 0) {
+  if (strcaselesscmp(cp, "ENDIF") == 0) {
     if (ifdef == 0) {
       print_error(".ENDIF was given before any .IF directive.\n", ERROR_DIR);
       return FAILED;
@@ -2700,21 +2882,17 @@ int parse_directive(void) {
 
   /* IFDEF */
 
-  if (strcmp(cp, "IFDEF") == 0) {
+  if (strcaselesscmp(cp, "IFDEF") == 0) {
 
     struct definition *d;
-
 
     if (get_next_token() == FAILED)
       return FAILED;
 
-    d = defines;
-    while (d != NULL) {
-      if (strcmp(tmp, d->alias) == 0) {
-        ifdef++;
-        return SUCCEEDED;
-      }
-      d = d->next;
+    hashmap_get(defines_map, tmp, (void*)&d);
+    if (d != NULL) {
+      ifdef++;
+      return SUCCEEDED;
     }
 
     return find_next_point("IFDEF");
@@ -2722,7 +2900,7 @@ int parse_directive(void) {
 
   /* IF */
 
-  if (strcmp(cp, "IF") == 0) {
+  if (strcaselesscmp(cp, "IF") == 0) {
 
     char k[256];
     int y, o, s;
@@ -2798,7 +2976,7 @@ int parse_directive(void) {
 
   /* IFGR/IFLE/IFEQ/IFNEQ/IFGREQ/IFLEEQ */
 
-  if (strcmp(cp, "IFGR") == 0 || strcmp(cp, "IFLE") == 0 || strcmp(cp, "IFEQ") == 0 || strcmp(cp, "IFNEQ") == 0 || strcmp(cp, "IFGREQ") == 0 || strcmp(cp, "IFLEEQ") == 0) {
+  if (strcaselesscmp(cp, "IFGR") == 0 || strcaselesscmp(cp, "IFLE") == 0 || strcaselesscmp(cp, "IFEQ") == 0 || strcaselesscmp(cp, "IFNEQ") == 0 || strcaselesscmp(cp, "IFGREQ") == 0 || strcaselesscmp(cp, "IFLEEQ") == 0) {
 
     char k[256];
     int y, o, s;
@@ -2871,7 +3049,7 @@ int parse_directive(void) {
 
   /* IFEXISTS */
 
-  if (strcmp(cp, "IFEXISTS") == 0) {
+  if (strcaselesscmp(cp, "IFEXISTS") == 0) {
 
     FILE *f;
 
@@ -2895,21 +3073,17 @@ int parse_directive(void) {
 
   /* IFNDEF */
 
-  if (strcmp(cp, "IFNDEF") == 0) {
+  if (strcaselesscmp(cp, "IFNDEF") == 0) {
 
     struct definition *d;
-
 
     if (get_next_token() == FAILED)
       return FAILED;
 
-    d = defines;
-    while (d != NULL) {
-      if (strcmp(tmp, d->alias) == 0) {
-        strcpy(emsg, cp);
-        return find_next_point(emsg);
-      }
-      d = d->next;
+    hashmap_get(defines_map, tmp, (void*)&d);
+    if (d != NULL) {
+      strcpy(emsg, cp);
+      return find_next_point(emsg);
     }
 
     ifdef++;
@@ -2918,7 +3092,7 @@ int parse_directive(void) {
 
   /* IFDEFM/IFNDEFM */
 
-  if (strcmp(cp, "IFDEFM") == 0 || strcmp(cp, "IFNDEFM") == 0) {
+  if (strcaselesscmp(cp, "IFDEFM") == 0 || strcaselesscmp(cp, "IFNDEFM") == 0) {
 
     int k, o;
     char e;
@@ -2975,7 +3149,7 @@ int parse_directive(void) {
 
   /* FOPEN */
 
-  if (strcmp(cp, "FOPEN") == 0) {
+  if (strcaselesscmp(cp, "FOPEN") == 0) {
 
     struct filepointer *f;
     char *c;
@@ -3050,7 +3224,7 @@ int parse_directive(void) {
 
   /* FCLOSE */
 
-  if (strcmp(cp, "FCLOSE") == 0) {
+  if (strcaselesscmp(cp, "FCLOSE") == 0) {
 
     struct filepointer *f, **t;
 
@@ -3089,7 +3263,7 @@ int parse_directive(void) {
 
   /* FSIZE */
 
-  if (strcmp(cp, "FSIZE") == 0) {
+  if (strcaselesscmp(cp, "FSIZE") == 0) {
 
     struct filepointer *f;
     long l, b;
@@ -3129,7 +3303,7 @@ int parse_directive(void) {
 
   /* FREAD */
 
-  if (strcmp(cp, "FREAD") == 0) {
+  if (strcaselesscmp(cp, "FREAD") == 0) {
 
     struct filepointer *f;
     unsigned char c;
@@ -3166,7 +3340,7 @@ int parse_directive(void) {
 
   /* BLOCK */
 
-  if (strcmp(cp, "BLOCK") == 0) {
+  if (strcaselesscmp(cp, "BLOCK") == 0) {
     if ((ind = get_next_token()) == FAILED)
       return FAILED;
 
@@ -3185,8 +3359,7 @@ int parse_directive(void) {
 
   /* ENDB */
 
-  if (strcmp(cp, "ENDB") == 0) {
-
+  if (strcaselesscmp(cp, "ENDB") == 0) {
     if (block_status <= 0) {
       print_error("There is no open .BLOCK.\n", ERROR_DIR);
       return FAILED;
@@ -3200,7 +3373,7 @@ int parse_directive(void) {
 
   /* SHIFT */
 
-  if (strcmp(cp, "SHIFT") == 0) {
+  if (strcaselesscmp(cp, "SHIFT") == 0) {
 
     struct macro_argument *ma;
     struct macro_runtime *rt;
@@ -3263,9 +3436,22 @@ int parse_directive(void) {
   }
 
 #ifdef GB
+  /* NINTENDOLOGO */
+  
+  if (strcaselesscmp(cp, "NINTENDOLOGO") == 0) {
+    if (output_format == OUTPUT_LIBRARY) {
+      print_error("Library files don't take .NINTENDOLOGO.\n", ERROR_DIR);
+      return FAILED;
+    }
+
+    nintendologo_defined++;
+
+    return SUCCEEDED;
+  }
+  
   /* NAME */
 
-  if (strcmp(cp, "NAME") == 0) {
+  if (strcaselesscmp(cp, "NAME") == 0) {
     if (output_format == OUTPUT_LIBRARY) {
       print_error("Library files don't take .NAME.\n", ERROR_DIR);
       return FAILED;
@@ -3295,7 +3481,6 @@ int parse_directive(void) {
     }
     /* compare the names */
     else {
-
       for (ind = 0; tmp[ind] != 0 && name[ind] != 0 && ind < 16; ind++)
         if (name[ind] != tmp[ind])
           break;
@@ -3317,7 +3502,7 @@ int parse_directive(void) {
 #ifdef W65816
   /* NAME */
 
-  if (strcmp(cp, "NAME") == 0) {
+  if (strcaselesscmp(cp, "NAME") == 0) {
     if (output_format == OUTPUT_LIBRARY) {
       print_error("Library files don't take .NAME.\n", ERROR_DIR);
       return FAILED;
@@ -3333,7 +3518,6 @@ int parse_directive(void) {
 
     /* no name has been defined so far */
     if (name_defined == 0) {
-
       for (ind = 0; tmp[ind] != 0 && ind < 21; ind++)
         name[ind] = tmp[ind];
 
@@ -3346,9 +3530,8 @@ int parse_directive(void) {
 
       name_defined = 1;
     }
-    /* compare the names */
     else {
-
+      /* compare the names */
       for (ind = 0; tmp[ind] != 0 && name[ind] != 0 && ind < 21; ind++)
         if (name[ind] != tmp[ind])
           break;
@@ -3369,8 +3552,7 @@ int parse_directive(void) {
 
   /* ENDS */
 
-  if (strcmp(cp, "ENDS") == 0) {
-
+  if (strcaselesscmp(cp, "ENDS") == 0) {
     if (section_status == OFF) {
       print_error("There is no open section.\n", ERROR_DIR);
       return FAILED;
@@ -3385,8 +3567,7 @@ int parse_directive(void) {
 
   /* ROMBANKS */
 
-  if (strcmp(cp, "ROMBANKS") == 0) {
-
+  if (strcaselesscmp(cp, "ROMBANKS") == 0) {
     if (output_format == OUTPUT_LIBRARY) {
       print_error("Library files don't take .ROMBANKS.\n", ERROR_DIR);
       return FAILED;
@@ -3498,7 +3679,7 @@ int parse_directive(void) {
 
   /* ROMBANKMAP */
 
-  if (strcmp(cp, "ROMBANKMAP") == 0) {
+  if (strcaselesscmp(cp, "ROMBANKMAP") == 0) {
 
     int b = 0, a = 0, bt = 0, bt_defined = 0, x, bs = 0, bs_defined = 0;
 
@@ -3756,7 +3937,7 @@ int parse_directive(void) {
 
   /* MEMORYMAP */
 
-  if (strcmp(cp, "MEMORYMAP") == 0) {
+  if (strcaselesscmp(cp, "MEMORYMAP") == 0) {
 
     int slotsize = 0, slotsize_defined = 0, s = 0;
 
@@ -3892,7 +4073,7 @@ int parse_directive(void) {
 
   /* UNBACKGROUND */
 
-  if (strcmp(cp, "UNBACKGROUND") == 0) {
+  if (strcaselesscmp(cp, "UNBACKGROUND") == 0) {
 
     int start, end;
 
@@ -3954,7 +4135,7 @@ int parse_directive(void) {
 
   /* BACKGROUND */
 
-  if (strcmp(cp, "BACKGROUND") == 0) {
+  if (strcaselesscmp(cp, "BACKGROUND") == 0) {
 
     FILE *file_in_ptr;
 
@@ -4016,7 +4197,7 @@ int parse_directive(void) {
 #ifdef GB
   /* RAMSIZE */
 
-  if (strcmp(cp, "RAMSIZE") == 0) {
+  if (strcaselesscmp(cp, "RAMSIZE") == 0) {
 
     if (output_format == OUTPUT_LIBRARY) {
       print_error("Library files don't take .RAMSIZE.\n", ERROR_DIR);
@@ -4051,9 +4232,77 @@ int parse_directive(void) {
     return SUCCEEDED;
   }
 
+
+  /* COUNTRYCODE */
+
+  if (strcaselesscmp(cp, "COUNTRYCODE") == 0) {
+
+    if (output_format == OUTPUT_LIBRARY) {
+      print_error("Library files don't take .COUNTRYCODE.\n", ERROR_DIR);
+      return FAILED;
+    }
+
+    q = input_number();
+
+    if (q == FAILED)
+      return FAILED;
+    if (q != SUCCEEDED || q < 0) {
+      print_error(".COUNTRYCODE needs a non-negative value.\n", ERROR_DIR);
+      return FAILED;
+    }
+
+    if (countrycode_defined != 0) {
+      if (countrycode != d) {
+        print_error(".COUNTRYCODE was defined for the second time.\n", ERROR_DIR);
+        return FAILED;
+      }
+      return SUCCEEDED;
+    }
+
+    countrycode = d;
+    countrycode_defined = 1;
+
+    return SUCCEEDED;
+  }
+  
+  
+  /* DESTINATIONCODE */
+
+  if (strcaselesscmp(cp, "DESTINATIONCODE") == 0) {
+
+    if (output_format == OUTPUT_LIBRARY) {
+      print_error("Library files don't take .DESTINATIONCODE.\n", ERROR_DIR);
+      return FAILED;
+    }
+
+    q = input_number();
+
+    if (q == FAILED)
+      return FAILED;
+    if (q != SUCCEEDED || q < 0) {
+      print_error(".DESTINATIONCODE needs a non-negative value.\n", ERROR_DIR);
+      return FAILED;
+    }
+
+    if (countrycode_defined != 0) {
+      if (countrycode != d) {
+        print_error(".DESTINATIONCODE was defined for the second time.\n", ERROR_DIR);
+        return FAILED;
+      }
+      return SUCCEEDED;
+    }
+
+    countrycode = d;
+    countrycode_defined = 1;
+
+    return SUCCEEDED;
+  }
+  
+
+
   /* CARTRIDGETYPE */
 
-  if (strcmp(cp, "CARTRIDGETYPE") == 0) {
+  if (strcaselesscmp(cp, "CARTRIDGETYPE") == 0) {
 
     if (output_format == OUTPUT_LIBRARY) {
       print_error("Library files don't take .CARTRIDGETYPE.\n", ERROR_DIR);
@@ -4085,7 +4334,7 @@ int parse_directive(void) {
 
   /* LICENSEECODENEW */
 
-  if (strcmp(cp, "LICENSEECODENEW") == 0) {
+  if (strcaselesscmp(cp, "LICENSEECODENEW") == 0) {
 
     if (output_format == OUTPUT_LIBRARY) {
       print_error("Library files don't take .LICENSEECODENEW.\n", ERROR_DIR);
@@ -4125,7 +4374,7 @@ int parse_directive(void) {
 
   /* LICENSEECODEOLD */
 
-  if (strcmp(cp, "LICENSEECODEOLD") == 0) {
+  if (strcaselesscmp(cp, "LICENSEECODEOLD") == 0) {
 
     if (output_format == OUTPUT_LIBRARY) {
       print_error("Library files don't take .LICENSEECODEOLD.\n", ERROR_DIR);
@@ -4141,7 +4390,8 @@ int parse_directive(void) {
     if (q == FAILED)
       return FAILED;
     if (q != SUCCEEDED || d < -127 || d > 255) {
-      print_error(".LICENSEECODEOLD needs a 8bit value.\n", ERROR_DIR);
+      sprintf(emsg, ".LICENSEECODEOLD needs a 8-bit value, got %d.\n", d);
+      print_error(emsg, ERROR_DIR);
       return FAILED;
     }
 
@@ -4158,12 +4408,252 @@ int parse_directive(void) {
 
     return SUCCEEDED;
   }
+
+  /* GBHEADER */
+
+  if (strcmp(cp, "GBHEADER") == 0) {
+    if (gbheader_defined != 0) {
+      print_error(".GBHEADER can be defined only once.\n", ERROR_DIR);
+      return FAILED;
+    }
+
+    if (computechecksum_defined != 0)
+      print_error(".COMPUTEGBCHECKSUM unnecessary when .GBHEADER is defined.\n", ERROR_WRN);
+    else
+      computechecksum_defined++;
+
+    if (computecomplementcheck_defined != 0)
+      print_error(".COMPUTEGBCOMPLEMENTCHECK unecessary when .GBHEADER is defined.\n", ERROR_WRN);
+    else
+      computecomplementcheck_defined++;
+
+    if (output_format == OUTPUT_LIBRARY) {
+      print_error("Libraries don't take .GBHEADER.\n", ERROR_DIR);
+      return FAILED;
+    }
+
+    while ((ind = get_next_token()) == SUCCEEDED) {
+      if (strcaselesscmp(tmp, ".ENDGB") == 0)
+        break;
+      else if (strcaselesscmp(cp, "NINTENDOLOGO") == 0)
+        nintendologo_defined++;
+      else if (strcaselesscmp(tmp, "ROMDMG") == 0) {
+        if (romgbc != 0) {
+	  print_error(".ROMGBC was defined prior to .ROMDMG.\n", ERROR_DIR);
+          return FAILED;
+        }
+        else if (romsgb != 0) {
+          print_error(".ROMDMG and .ROMSGB cannot be mixed.\n", ERROR_DIR);
+          return FAILED;
+        }
+        romdmg++;
+      }
+      else if (strcaselesscmp(tmp, "ROMGBC") == 0) {
+        if (romdmg != 0) {
+	  print_error(".ROMDMG was defined prior to .ROMGBC.\n", ERROR_DIR);
+          return FAILED;
+        }
+        romgbc++;
+      }
+      else if (strcaselesscmp(tmp, "ROMSGB") == 0) {
+        if (romdmg != 0) {
+          print_error(".ROMDMG and .ROMSGB cannot be mixed.\n", ERROR_DIR);
+          return FAILED;
+        }
+        romsgb++;
+      }
+      else if (strcaselesscmp(tmp, "NAME") == 0) {
+        if ((ind = get_next_token()) == FAILED)
+          return FAILED;
+
+        if (ind != GET_NEXT_TOKEN_STRING) {
+          print_error("NAME requires a string of 1 to 16 letters.\n", ERROR_DIR);
+          return FAILED;
+        }
+
+        /* no name has been defined so far */
+        if (name_defined == 0) {
+          for (ind = 0; tmp[ind] != 0 && ind < 16; ind++)
+            name[ind] = tmp[ind];
+
+          if (ind == 16 && tmp[ind] != 0) {
+            print_error("NAME requires a string of 1 to 16 letters.\n", ERROR_DIR);
+            return FAILED;
+          }
+
+          for ( ; ind < 16; name[ind] = 0, ind++);
+
+          name_defined = 1;
+        }
+        else {
+	  /* compare the names */
+          for (ind = 0; tmp[ind] != 0 && name[ind] != 0 && ind < 16; ind++)
+            if (name[ind] != tmp[ind])
+              break;
+
+          if (ind == 16 && tmp[ind] != 0) {
+            print_error("NAME requires a string of 1 to 16 letters.\n", ERROR_DIR);
+            return FAILED;
+          }
+          if (ind != 16 && (name[ind] != 0 || tmp[ind] != 0)) {
+            print_error("NAME was already defined.\n", ERROR_DIR);
+            return FAILED;
+          }
+        }
+      }
+      else if (strcaselesscmp(tmp, "LICENSEECODEOLD") == 0) {
+        if (licenseecodenew_defined != 0) {
+          print_error(".LICENSEECODENEW and .LICENSEECODEOLD cannot both be defined.\n", ERROR_DIR);
+          return FAILED;
+        }
+
+        q = input_number();
+
+        if (q == FAILED)
+          return FAILED;
+        if (q != SUCCEEDED || d < -127 || d > 255) {
+	  sprintf(emsg, ".LICENSEECODEOLD needs a 8-bit value, got %d.\n", d);
+	  print_error(emsg, ERROR_DIR);
+	  return FAILED;
+        }
+
+        if (licenseecodeold_defined != 0) {
+          if (licenseecodeold != d) {
+            print_error(".LICENSEECODEOLD was defined for the second time.\n", ERROR_DIR);
+            return FAILED;
+          }
+        }
+
+        licenseecodeold = d;
+        licenseecodeold_defined = 1;
+      }
+      else if (strcaselesscmp(tmp, "LICENSEECODENEW") == 0) {
+        if (licenseecodeold_defined != 0) {
+          print_error(".LICENSEECODENEW and .LICENSEECODEOLD cannot both be defined.\n", ERROR_DIR);
+          return FAILED;
+        }
+
+        if ((ind = get_next_token()) == FAILED)
+          return FAILED;
+
+        if (ind != GET_NEXT_TOKEN_STRING) {
+          print_error(".LICENSEECODENEW requires a string of two letters.\n", ERROR_DIR);
+          return FAILED;
+        }
+        if (!(tmp[0] != 0 && tmp[1] != 0 && tmp[2] == 0)) {
+          print_error(".LICENSEECODENEW requires a string of two letters.\n", ERROR_DIR);
+          return FAILED;
+	}
+
+        if (licenseecodenew_defined != 0) {
+          if (tmp[0] != licenseecodenew_c1 || tmp[1] != licenseecodenew_c2) {
+            print_error(".LICENSEECODENEW was defined for the second time.\n", ERROR_DIR);
+            return FAILED;
+          }
+
+        licenseecodenew_c1 = tmp[0];
+        licenseecodenew_c2 = tmp[1];
+        licenseecodenew_defined = 1;
+      }
+      }
+      else if (strcaselesscmp(tmp, "CARTRIDGETYPE") == 0) {
+        if (cartridgetype_defined != 0) {
+          print_error("CARTRIDGETYPE can be defined only once.\n", ERROR_DIR);
+          return FAILED;
+        }
+
+        inz = input_number();
+
+        if (inz == SUCCEEDED && (d < -128 || d > 255)) {
+          sprintf(emsg, "CARTRIDGETYPE needs a 8-bit value, got %d.\n", d);
+          print_error(emsg, ERROR_DIR);
+          return FAILED;
+        }
+        else if (inz == SUCCEEDED) {
+          cartridgetype = d;
+          cartridgetype_defined++;
+        }
+
+        else return FAILED;
+      }
+      else if (strcaselesscmp(tmp, "RAMSIZE") == 0) {
+        if (rambanks != 0) {
+          print_error("RAMSIZE can be defined only once.\n", ERROR_DIR);
+          return FAILED;
+        }
+
+        inz = input_number();
+
+        if (inz == SUCCEEDED && (d < -128 || d > 255)) {
+          sprintf(emsg, "RAMSIZE needs a 8-bit value, got %d.\n", d);
+          print_error(emsg, ERROR_DIR);
+          return FAILED;
+        }
+        else if (inz == SUCCEEDED)
+          rambanks = d;
+        else
+          return FAILED;
+      }
+      else if (strcaselesscmp(tmp, "COUNTRYCODE") == 0) {
+        if (countrycode_defined != 0) {
+          print_error("COUNTRYCODE can be defined only once.\n", ERROR_DIR);
+          return FAILED;
+        }
+
+        inz = input_number();
+
+        if (inz == SUCCEEDED && (d < -128 || d > 255)) {
+          sprintf(emsg, "COUNTRYCODE needs a non-negative value, got %d.\n\n", d);
+          print_error(emsg, ERROR_DIR);
+          return FAILED;
+        }
+        else if (inz == SUCCEEDED) {
+          countrycode = d;
+          countrycode_defined++;
+        }
+        else
+          return FAILED;
+      }
+      else if (strcaselesscmp(tmp, "DESTINATIONCODE") == 0) {
+        if (countrycode_defined != 0) {
+          print_error("DESTINATIONCODE can be defined only once.\n", ERROR_DIR);
+          return FAILED;
+        }
+
+        inz = input_number();
+
+        if (inz == SUCCEEDED && (d < -128 || d > 255)) {
+          sprintf(emsg, "DESTINATIONCODE needs a non-negative value, got %d.\n\n", d);
+          print_error(emsg, ERROR_DIR);
+          return FAILED;
+        }
+        else if (inz == SUCCEEDED) {
+          countrycode = d;
+          countrycode_defined++;
+        }
+        else
+          return FAILED;
+      }
+      else {
+        ind = FAILED;
+        break;
+      }
+    }
+
+    if (ind != SUCCEEDED) {
+      print_error("Error in .GBHEADER data structure.\n", ERROR_DIR);
+      return FAILED;
+    }
+
+    gbheader_defined = 1;
+
+    return SUCCEEDED;
+  }
 #endif
 
   /* EMPTYFILL */
 
-  if (strcmp(cp, "EMPTYFILL") == 0) {
-
+  if (strcaselesscmp(cp, "EMPTYFILL") == 0) {
     if (output_format == OUTPUT_LIBRARY) {
       print_error("Library files don't take .EMPTYFILL.\n", ERROR_DIR);
       return FAILED;
@@ -4174,7 +4664,8 @@ int parse_directive(void) {
     if (q == FAILED)
       return FAILED;
     if (q != SUCCEEDED || d < -127 || d > 255) {
-      print_error(".EMPTYFILL needs a 8bit value.\n", ERROR_DIR);
+      sprintf(emsg, ".EMPTYFILL needs a 8-bit value, got %d.\n", d);
+      print_error(emsg, ERROR_DIR);
       return FAILED;
     }
 
@@ -4194,7 +4685,7 @@ int parse_directive(void) {
 
   /* DEFINE/DEF/EQU */
 
-  if (strcmp(cp, "DEFINE") == 0 || strcmp(cp, "DEF") == 0 || strcmp(cp, "EQU") == 0) {
+  if (strcaselesscmp(cp, "DEFINE") == 0 || strcaselesscmp(cp, "DEF") == 0 || strcaselesscmp(cp, "EQU") == 0) {
 
     double dou;
     char k[256];
@@ -4246,7 +4737,7 @@ int parse_directive(void) {
 
   /* INPUT */
 
-  if (strcmp(cp, "INPUT") == 0) {
+  if (strcaselesscmp(cp, "INPUT") == 0) {
 
     char k[256];
     int j, v;
@@ -4343,7 +4834,7 @@ int parse_directive(void) {
 
   /* REDEFINE/REDEF */
 
-  if (strcmp(cp, "REDEFINE") == 0 || strcmp(cp, "REDEF") == 0) {
+  if (strcaselesscmp(cp, "REDEFINE") == 0 || strcaselesscmp(cp, "REDEF") == 0) {
 
     double dou;
     char k[256];
@@ -4394,7 +4885,7 @@ int parse_directive(void) {
 
   /* EXPORT */
 
-  if (strcmp(cp, "EXPORT") == 0) {
+  if (strcaselesscmp(cp, "EXPORT") == 0) {
     q = 0;
     while (1) {
       ind = input_next_string();
@@ -4420,7 +4911,7 @@ int parse_directive(void) {
 
   /* SYM/SYMBOL */
 
-  if (strcmp(cp, "SYM") == 0 || strcmp(cp, "SYMBOL") == 0) {
+  if (strcaselesscmp(cp, "SYM") == 0 || strcaselesscmp(cp, "SYMBOL") == 0) {
     ind = input_next_string();
     if (ind != SUCCEEDED) {
       print_error(".SYM requires a symbol name.\n", ERROR_DIR);
@@ -4434,14 +4925,14 @@ int parse_directive(void) {
 
   /* BR/BREAKPOINT */
 
-  if (strcmp(cp, "BR") == 0 || strcmp(cp, "BREAKPOINT") == 0) {
+  if (strcaselesscmp(cp, "BR") == 0 || strcaselesscmp(cp, "BREAKPOINT") == 0) {
     fprintf(file_out_ptr, "Z ");
     return SUCCEEDED;
   }
 
   /* ENUM */
 
-  if (strcmp(cp, "ENUM") == 0) {
+  if (strcaselesscmp(cp, "ENUM") == 0) {
 
     char tmpname[MAX_NAME_LENGTH];
     int exp = NO, ord = 1, type;
@@ -4646,11 +5137,15 @@ int parse_directive(void) {
 #ifdef GB
   /* COMPUTEGBCHECKSUM */
 
-  if (strcmp(cp, "COMPUTECHECKSUM") == 0 || strcmp(cp, "COMPUTEGBCHECKSUM") == 0) {
+  if (strcaselesscmp(cp, "COMPUTECHECKSUM") == 0 || strcaselesscmp(cp, "COMPUTEGBCHECKSUM") == 0) {
 
     if (output_format == OUTPUT_LIBRARY) {
       print_error("Library files don't take .COMPUTEGBCHECKSUM.\n", ERROR_DIR);
       return FAILED;
+    }
+    
+    if (gbheader_defined != 0) {
+      print_error(".COMPUTEGBCHECKSUM unnecessary when GBHEADER is defined.\n", ERROR_WRN);
     }
 
     computechecksum_defined = 1;
@@ -4660,11 +5155,15 @@ int parse_directive(void) {
 
   /* COMPUTEGBCOMPLEMENTCHECK */
 
-  if (strcmp(cp, "COMPUTEGBCOMPLEMENTCHECK") == 0 || strcmp(cp, "COMPUTECOMPLEMENTCHECK") == 0) {
+  if (strcaselesscmp(cp, "COMPUTEGBCOMPLEMENTCHECK") == 0 || strcaselesscmp(cp, "COMPUTECOMPLEMENTCHECK") == 0) {
 
     if (output_format == OUTPUT_LIBRARY) {
       print_error("Library files don't take .COMPUTEGBCOMPLEMENTCHECK.\n", ERROR_DIR);
       return FAILED;
+    }
+    
+    if (gbheader_defined != 0) {
+      print_error(".COMPUTEGBCOMPLEMENTCHECK unnecessary when GBHEADER is defined.\n", ERROR_WRN);
     }
 
     computecomplementcheck_defined = 1;
@@ -4676,7 +5175,7 @@ int parse_directive(void) {
 #ifdef W65816
   /* COMPUTESNESCHECKSUM */
 
-  if (strcmp(cp, "COMPUTESNESCHECKSUM") == 0) {
+  if (strcaselesscmp(cp, "COMPUTESNESCHECKSUM") == 0) {
 
     if (output_format == OUTPUT_LIBRARY) {
       print_error("Library files don't take .COMPUTESNESCHECKSUM.\n", ERROR_DIR);
@@ -4698,7 +5197,7 @@ int parse_directive(void) {
 #ifdef Z80
   /* COMPUTESMSCHECKSUM */
 
-  if (strcmp(cp, "COMPUTESMSCHECKSUM") == 0) {
+  if (strcaselesscmp(cp, "COMPUTESMSCHECKSUM") == 0) {
 
     if (output_format == OUTPUT_LIBRARY) {
       print_error("Library files don't take .COMPUTESMSCHECKSUM.\n", ERROR_DIR);
@@ -4710,7 +5209,7 @@ int parse_directive(void) {
     return SUCCEEDED;
   }
 
-  if (strcmp(cp, "SMSTAG") == 0) {
+  if (strcaselesscmp(cp, "SMSTAG") == 0) {
 
     if (output_format == OUTPUT_LIBRARY) {
       print_error("Library files don't take .SMSTAG.\n", ERROR_DIR);
@@ -4725,7 +5224,7 @@ int parse_directive(void) {
 
   /* SDSCTAG */
 
-  if (strcmp(cp, "SDSCTAG") == 0) {
+  if (strcaselesscmp(cp, "SDSCTAG") == 0) {
 
     if (sdsctag_defined != 0) {
       print_error(".SDSCTAG can be defined only once.\n", ERROR_DIR);
@@ -4864,7 +5363,7 @@ int parse_directive(void) {
 
   /* MACRO */
 
-  if (strcmp(cp, "MACRO") == 0) {
+  if (strcaselesscmp(cp, "MACRO") == 0) {
 
     struct macro_static *m;
     int macro_start_line;
@@ -4873,7 +5372,7 @@ int parse_directive(void) {
     if (get_next_token() == FAILED)
       return FAILED;
 
-    if (strcmp(cp, "ENDM") == 0) {
+    if (strcaselesscmp(cp, "ENDM") == 0) {
       print_error("A MACRO must have a name.\n", ERROR_DIR);
       return FAILED;
     }
@@ -4971,7 +5470,7 @@ int parse_directive(void) {
 
   /* REPT/REPEAT */
 
-  if (strcmp(cp, "REPT") == 0 || strcmp(cp, "REPEAT") == 0) {
+  if (strcaselesscmp(cp, "REPT") == 0 || strcaselesscmp(cp, "REPEAT") == 0) {
 
     char c[16], index_name[MAX_NAME_LENGTH];
 
@@ -5018,11 +5517,11 @@ int parse_directive(void) {
       macro_active = 0;
       while (get_next_token() != FAILED) {
         if (tmp[0] == '.') {
-          if (strcmp(cp, "ENDR") == 0)
+          if (strcaselesscmp(cp, "ENDR") == 0)
             r--;
-          if (strcmp(cp, "E") == 0)
+          if (strcaselesscmp(cp, "E") == 0)
             break;
-          if (strcmp(cp, "REPT") == 0 || strcmp(cp, "REPEAT") == 0)
+          if (strcaselesscmp(cp, "REPT") == 0 || strcaselesscmp(cp, "REPEAT") == 0)
             r++;
         }
         if (r == 0) {
@@ -5063,7 +5562,7 @@ int parse_directive(void) {
 
   /* ENDR */
 
-  if (strcmp(cp, "ENDR") == 0) {
+  if (strcaselesscmp(cp, "ENDR") == 0) {
 
     struct repeat_runtime *rr = NULL;
     
@@ -5094,7 +5593,7 @@ int parse_directive(void) {
 
   /* E */
 
-  if (strcmp(cp, "E") == 0) {
+  if (strcaselesscmp(cp, "E") == 0) {
     if (active_file_info_last != NULL) {
       active_file_info_tmp = active_file_info_last;
       active_file_info_last = active_file_info_last->prev;
@@ -5121,7 +5620,7 @@ int parse_directive(void) {
 
   /* M */
 
-  if (strcmp(cp, "M") == 0) {
+  if (strcaselesscmp(cp, "M") == 0) {
     if (line_count_status == OFF)
       line_count_status = ON;
     else
@@ -5132,7 +5631,7 @@ int parse_directive(void) {
 #ifdef GB
   /* ROMGBC */
 
-  if (strcmp(cp, "ROMGBC") == 0) {
+  if (strcaselesscmp(cp, "ROMGBC") == 0) {
 
     if (output_format == OUTPUT_LIBRARY) {
       print_error("Library files don't take .ROMGBC.\n", ERROR_DIR);
@@ -5150,7 +5649,7 @@ int parse_directive(void) {
 
   /* ROMDMG */
 
-  if (strcmp(cp, "ROMDMG") == 0) {
+  if (strcaselesscmp(cp, "ROMDMG") == 0) {
     if (output_format == OUTPUT_LIBRARY) {
       print_error("Library files don't take .ROMDMG.\n", ERROR_DIR);
       return FAILED;
@@ -5171,7 +5670,7 @@ int parse_directive(void) {
 
   /* ROMSGB */
 
-  if (strcmp(cp, "ROMSGB") == 0) {
+  if (strcaselesscmp(cp, "ROMSGB") == 0) {
     if (output_format == OUTPUT_LIBRARY) {
       print_error("Library files don't take .ROMSGB.\n", ERROR_DIR);
       return FAILED;
@@ -5189,7 +5688,7 @@ int parse_directive(void) {
 
   /* ROMBANKSIZE */
 
-  if (strcmp(cp, "ROMBANKSIZE") == 0 || strcmp(cp, "BANKSIZE") == 0) {
+  if (strcaselesscmp(cp, "ROMBANKSIZE") == 0 || strcaselesscmp(cp, "BANKSIZE") == 0) {
     q = input_number();
 
     if (q == FAILED)
@@ -5215,7 +5714,7 @@ int parse_directive(void) {
 
   /* ENDM */
 
-  if (strcmp(cp, "ENDM") == 0) {
+  if (strcaselesscmp(cp, "ENDM") == 0) {
     if (macro_active != 0) {
       macro_active--;
 
@@ -5304,14 +5803,14 @@ int parse_directive(void) {
 
   /* 8BIT */
 
-  if (strcmp(cp, "8BIT") == 0) {
+  if (strcaselesscmp(cp, "8BIT") == 0) {
     xbit_size = 8;
     return SUCCEEDED;
   }
 
   /* 16BIT */
 
-  if (strcmp(cp, "16BIT") == 0) {
+  if (strcaselesscmp(cp, "16BIT") == 0) {
     xbit_size = 16;
     return SUCCEEDED;
   }
@@ -5322,14 +5821,14 @@ int parse_directive(void) {
 
   /* 24BIT */
 
-  if (strcmp(cp, "24BIT") == 0) {
+  if (strcaselesscmp(cp, "24BIT") == 0) {
     xbit_size = 24;
     return SUCCEEDED;
   }
 
   /* INDEX */
 
-  if (strcmp(cp, "INDEX") == 0) {
+  if (strcaselesscmp(cp, "INDEX") == 0) {
     q = input_number();
 
     if (q == FAILED)
@@ -5346,7 +5845,7 @@ int parse_directive(void) {
 
   /* ACCU */
 
-  if (strcmp(cp, "ACCU") == 0) {
+  if (strcaselesscmp(cp, "ACCU") == 0) {
     q = input_number();
 
     if (q == FAILED)
@@ -5363,7 +5862,7 @@ int parse_directive(void) {
 
   /* BASE */
 
-  if (strcmp(cp, "BASE") == 0) {
+  if (strcaselesscmp(cp, "BASE") == 0) {
     if (output_format == OUTPUT_LIBRARY) {
       print_error("Library files don't take .BASE definitions.\n", ERROR_DIR);
       return FAILED;
@@ -5385,7 +5884,7 @@ int parse_directive(void) {
 
   /* SMC */
 
-  if (strcmp(cp, "SMC") == 0) {
+  if (strcaselesscmp(cp, "SMC") == 0) {
     if (output_format == OUTPUT_LIBRARY) {
       print_error("Library files don't take .SMC.\n", ERROR_DIR);
       return FAILED;
@@ -5399,7 +5898,7 @@ int parse_directive(void) {
 
   /* HIROM */
 
-  if (strcmp(cp, "HIROM") == 0) {
+  if (strcaselesscmp(cp, "HIROM") == 0) {
     if (output_format == OUTPUT_LIBRARY) {
       print_error("Library files don't take .HIROM.\n", ERROR_DIR);
       return FAILED;
@@ -5417,7 +5916,7 @@ int parse_directive(void) {
 
   /* LOROM */
 
-  if (strcmp(cp, "LOROM") == 0) {
+  if (strcaselesscmp(cp, "LOROM") == 0) {
     if (output_format == OUTPUT_LIBRARY) {
       print_error("Library files don't take .LOROM.\n", ERROR_DIR);
       return FAILED;
@@ -5435,7 +5934,7 @@ int parse_directive(void) {
 
   /* SLOWROM */
 
-  if (strcmp(cp, "SLOWROM") == 0) {
+  if (strcaselesscmp(cp, "SLOWROM") == 0) {
     if (output_format == OUTPUT_LIBRARY) {
       print_error("Library files don't take .SLOWROM.\n", ERROR_DIR);
       return FAILED;
@@ -5453,7 +5952,7 @@ int parse_directive(void) {
 
   /* FASTROM */
 
-  if (strcmp(cp, "FASTROM") == 0) {
+  if (strcaselesscmp(cp, "FASTROM") == 0) {
     if (output_format == OUTPUT_LIBRARY) {
       print_error("Library files don't take .FASTROM.\n", ERROR_DIR);
       return FAILED;
@@ -5471,7 +5970,7 @@ int parse_directive(void) {
 
   /* SNESHEADER */
 
-  if (strcmp(cp, "SNESHEADER") == 0) {
+  if (strcaselesscmp(cp, "SNESHEADER") == 0) {
     if (snesheader_defined != 0) {
       print_error(".SNESHEADER can be defined only once.\n", ERROR_DIR);
       return FAILED;
@@ -5606,7 +6105,7 @@ int parse_directive(void) {
         inz = input_number();
 
         if (inz == SUCCEEDED && (d < -127 || d > 255)) {
-          sprintf(emsg, "CARTRIDGETYPE expects 8bit data, %d is out of range!\n", d);
+          sprintf(emsg, "CARTRIDGETYPE expects 8-bit data, %d is out of range!\n", d);
           print_error(emsg, ERROR_DIR);
           return FAILED;
         }
@@ -5626,7 +6125,7 @@ int parse_directive(void) {
         inz = input_number();
 
         if (inz == SUCCEEDED && (d < -127 || d > 255)) {
-          sprintf(emsg, "ROMSIZE expects 8bit data, %d is out of range!\n", d);
+          sprintf(emsg, "ROMSIZE expects 8-bit data, %d is out of range!\n", d);
           print_error(emsg, ERROR_DIR);
           return FAILED;
         }
@@ -5644,7 +6143,7 @@ int parse_directive(void) {
         inz = input_number();
 
         if (inz == SUCCEEDED && (d < -127 || d > 255)) {
-          sprintf(emsg, "SRAMSIZE expects 8bit data, %d is out of range!\n", d);
+          sprintf(emsg, "SRAMSIZE expects 8-bit data, %d is out of range!\n", d);
           print_error(emsg, ERROR_DIR);
           return FAILED;
         }
@@ -5664,7 +6163,7 @@ int parse_directive(void) {
         inz = input_number();
 
         if (inz == SUCCEEDED && (d < -127 || d > 255)) {
-          sprintf(emsg, "COUNTRY expects 8bit data, %d is out of range!\n", d);
+          sprintf(emsg, "COUNTRY expects 8-bit data, %d is out of range!\n", d);
           print_error(emsg, ERROR_DIR);
           return FAILED;
         }
@@ -5684,7 +6183,7 @@ int parse_directive(void) {
         inz = input_number();
 
         if (inz == SUCCEEDED && (d < -127 || d > 255)) {
-          sprintf(emsg, "LICENSEECODE expects 8bit data, %d is out of range!\n", d);
+          sprintf(emsg, "LICENSEECODE expects 8-bit data, %d is out of range!\n", d);
           print_error(emsg, ERROR_DIR);
           return FAILED;
         }
@@ -5704,7 +6203,7 @@ int parse_directive(void) {
         inz = input_number();
 
         if (inz == SUCCEEDED && (d < -127 || d > 255)) {
-          sprintf(emsg, "VERSION expects 8bit data, %d is out of range!\n", d);
+          sprintf(emsg, "VERSION expects 8-bit data, %d is out of range!\n", d);
           print_error(emsg, ERROR_DIR);
           return FAILED;
         }
@@ -5734,7 +6233,7 @@ int parse_directive(void) {
 
   /* SNESNATIVEVECTOR */
 
-  if (strcmp(cp, "SNESNATIVEVECTOR") == 0) {
+  if (strcaselesscmp(cp, "SNESNATIVEVECTOR") == 0) {
 
     int cop_defined = 0, brk_defined = 0, abort_defined = 0;
     int nmi_defined = 0, unused_defined = 0, irq_defined = 0;
@@ -5790,7 +6289,7 @@ int parse_directive(void) {
         inz = input_number();
 
         if (inz == SUCCEEDED && (d < -32768 || d > 65535)) {
-          sprintf(emsg, "COP expects 16bit data, %d is out of range!\n", d);
+          sprintf(emsg, "COP expects 16-bit data, %d is out of range!\n", d);
           print_error(emsg, ERROR_DIR);
           return FAILED;
         }
@@ -5813,7 +6312,7 @@ int parse_directive(void) {
         inz = input_number();
 
         if (inz == SUCCEEDED && (d < -32768 || d > 65535)) {
-          sprintf(emsg, "BRK expects 16bit data, %d is out of range!\n", d);
+          sprintf(emsg, "BRK expects 16-bit data, %d is out of range!\n", d);
           print_error(emsg, ERROR_DIR);
           return FAILED;
         }
@@ -5836,7 +6335,7 @@ int parse_directive(void) {
         inz = input_number();
 
         if (inz == SUCCEEDED && (d < -32768 || d > 65535)) {
-          sprintf(emsg, "ABORT expects 16bit data, %d is out of range!\n", d);
+          sprintf(emsg, "ABORT expects 16-bit data, %d is out of range!\n", d);
           print_error(emsg, ERROR_DIR);
           return FAILED;
         }
@@ -5859,7 +6358,7 @@ int parse_directive(void) {
         inz = input_number();
 
         if (inz == SUCCEEDED && (d < -32768 || d > 65535)) {
-          sprintf(emsg, "NMI expects 16bit data, %d is out of range!\n", d);
+          sprintf(emsg, "NMI expects 16-bit data, %d is out of range!\n", d);
           print_error(emsg, ERROR_DIR);
           return FAILED;
         }
@@ -5882,7 +6381,7 @@ int parse_directive(void) {
         inz = input_number();
 
         if (inz == SUCCEEDED && (d < -32768 || d > 65535)) {
-          sprintf(emsg, "UNUSED expects 16bit data, %d is out of range!\n", d);
+          sprintf(emsg, "UNUSED expects 16-bit data, %d is out of range!\n", d);
           print_error(emsg, ERROR_DIR);
           return FAILED;
         }
@@ -5905,7 +6404,7 @@ int parse_directive(void) {
         inz = input_number();
 
         if (inz == SUCCEEDED && (d < -32768 || d > 65535)) {
-          sprintf(emsg, "IRQ expects 16bit data, %d is out of range!\n", d);
+          sprintf(emsg, "IRQ expects 16-bit data, %d is out of range!\n", d);
           print_error(emsg, ERROR_DIR);
           return FAILED;
         }
@@ -5938,7 +6437,7 @@ int parse_directive(void) {
 
   /* SNESEMUVECTOR */
 
-  if (strcmp(cp, "SNESEMUVECTOR") == 0) {
+  if (strcaselesscmp(cp, "SNESEMUVECTOR") == 0) {
 
     int cop_defined = 0, unused_defined = 0, abort_defined = 0;
     int nmi_defined = 0, reset_defined = 0, irqbrk_defined = 0;
@@ -5994,7 +6493,7 @@ int parse_directive(void) {
         inz = input_number();
 
         if (inz == SUCCEEDED && (d < -32768 || d > 65535)) {
-          sprintf(emsg, "COP expects 16bit data, %d is out of range!\n", d);
+          sprintf(emsg, "COP expects 16-bit data, %d is out of range!\n", d);
           print_error(emsg, ERROR_DIR);
           return FAILED;
         }
@@ -6017,7 +6516,7 @@ int parse_directive(void) {
         inz = input_number();
 
         if (inz == SUCCEEDED && (d < -32768 || d > 65535)) {
-          sprintf(emsg, "RESET expects 16bit data, %d is out of range!\n", d);
+          sprintf(emsg, "RESET expects 16-bit data, %d is out of range!\n", d);
           print_error(emsg, ERROR_DIR);
           return FAILED;
         }
@@ -6040,7 +6539,7 @@ int parse_directive(void) {
         inz = input_number();
 
         if (inz == SUCCEEDED && (d < -32768 || d > 65535)) {
-          sprintf(emsg, "ABORT expects 16bit data, %d is out of range!\n", d);
+          sprintf(emsg, "ABORT expects 16-bit data, %d is out of range!\n", d);
           print_error(emsg, ERROR_DIR);
           return FAILED;
         }
@@ -6063,7 +6562,7 @@ int parse_directive(void) {
         inz = input_number();
 
         if (inz == SUCCEEDED && (d < -32768 || d > 65535)) {
-          sprintf(emsg, "NMI expects 16bit data, %d is out of range!\n", d);
+          sprintf(emsg, "NMI expects 16-bit data, %d is out of range!\n", d);
           print_error(emsg, ERROR_DIR);
           return FAILED;
         }
@@ -6086,7 +6585,7 @@ int parse_directive(void) {
         inz = input_number();
 
         if (inz == SUCCEEDED && (d < -32768 || d > 65535)) {
-          sprintf(emsg, "UNUSED expects 16bit data, %d is out of range!\n", d);
+          sprintf(emsg, "UNUSED expects 16-bit data, %d is out of range!\n", d);
           print_error(emsg, ERROR_DIR);
           return FAILED;
         }
@@ -6109,7 +6608,7 @@ int parse_directive(void) {
         inz = input_number();
 
         if (inz == SUCCEEDED && (d < -32768 || d > 65535)) {
-          sprintf(emsg, "IRQBRK expects 16bit data, %d is out of range!\n", d);
+          sprintf(emsg, "IRQBRK expects 16-bit data, %d is out of range!\n", d);
           print_error(emsg, ERROR_DIR);
           return FAILED;
         }
@@ -6144,7 +6643,7 @@ int parse_directive(void) {
 
   /* PRINTT */
 
-  if (strcmp(cp, "PRINTT") == 0) {
+  if (strcaselesscmp(cp, "PRINTT") == 0) {
 
     char t[256];
     int s, u;
@@ -6184,7 +6683,7 @@ int parse_directive(void) {
 
   /* PRINTV */
 
-  if (strcmp(cp, "PRINTV") == 0) {
+  if (strcaselesscmp(cp, "PRINTV") == 0) {
 
     int m;
 
@@ -6225,7 +6724,7 @@ int parse_directive(void) {
 
   /* SEED */
 
-  if (strcmp(cp, "SEED") == 0) {
+  if (strcaselesscmp(cp, "SEED") == 0) {
 
     q = input_number();
     if (q == FAILED)
@@ -6243,7 +6742,7 @@ int parse_directive(void) {
 
   /* DBRND/DWRND */
 
-  if (strcmp(cp, "DBRND") == 0 || strcmp(cp, "DWRND") == 0) {
+  if (strcaselesscmp(cp, "DBRND") == 0 || strcaselesscmp(cp, "DWRND") == 0) {
 
     int o, c, min, max, f;
 
@@ -6309,7 +6808,7 @@ int parse_directive(void) {
 
       if (o == 1) {
         if (d < -32768 || d > 65535) {
-          sprintf(emsg, ".%s: Expected a 16bit value, computed %d.\n", cp, d);
+          sprintf(emsg, ".%s: Expected a 16-bit value, computed %d.\n", cp, d);
           print_error(emsg, ERROR_NONE);
           return FAILED;
         }
@@ -6317,7 +6816,7 @@ int parse_directive(void) {
       }
       else {
         if (d > 255 || d < -127) {
-          sprintf(emsg, ".%s: Expected a 8bit value, computed %d.\n", cp, d);
+          sprintf(emsg, ".%s: Expected a 8-bit value, computed %d.\n", cp, d);
           print_error(emsg, ERROR_NONE);
           return FAILED;
         }
@@ -6330,7 +6829,7 @@ int parse_directive(void) {
 
   /* DWSIN/DBSIN/DWCOS/DBCOS */
 
-  if (strcmp(cp, "DWSIN") == 0 || strcmp(cp, "DBSIN") == 0 || strcmp(cp, "DWCOS") == 0 || strcmp(cp, "DBCOS") == 0) {
+  if (strcaselesscmp(cp, "DWSIN") == 0 || strcaselesscmp(cp, "DBSIN") == 0 || strcaselesscmp(cp, "DWCOS") == 0 || strcaselesscmp(cp, "DBCOS") == 0) {
 
     double m, a, s, n;
     int p, c, o, f;
@@ -6415,7 +6914,7 @@ int parse_directive(void) {
 
       if (o == 1) {
         if (d < -32768 || d > 65535) {
-          sprintf(emsg, ".%s: Expected a 16bit value, computed %d.\n", cp, d);
+          sprintf(emsg, ".%s: Expected a 16-bit value, computed %d.\n", cp, d);
           print_error(emsg, ERROR_NONE);
           return FAILED;
         }
@@ -6423,7 +6922,7 @@ int parse_directive(void) {
       }
       else {
         if (d > 255 || d < -127) {
-          sprintf(emsg, ".%s: Expected a 8bit value, computed %d.\n", cp, d);
+          sprintf(emsg, ".%s: Expected a 8-bit value, computed %d.\n", cp, d);
           print_error(emsg, ERROR_NONE);
           return FAILED;
         }
@@ -6438,7 +6937,7 @@ int parse_directive(void) {
 
   /* FAIL */
 
-  if (strcmp(cp, "FAIL") == 0) {
+  if (strcaselesscmp(cp, "FAIL") == 0) {
     print_error("HALT: .FAIL found.\n", ERROR_NONE);
 
     /* make a silent exit */
@@ -6447,7 +6946,7 @@ int parse_directive(void) {
 
   /* UNDEF/UNDEFINE */
 
-  if (strcmp(cp, "UNDEF") == 0 || strcmp(cp, "UNDEFINE") == 0) {
+  if (strcaselesscmp(cp, "UNDEF") == 0 || strcaselesscmp(cp, "UNDEFINE") == 0) {
 
     char c[16];
 
@@ -6482,12 +6981,12 @@ int parse_directive(void) {
 
   /* ASM */
 
-  if (strcmp(cp, "ASM") == 0)
+  if (strcaselesscmp(cp, "ASM") == 0)
     return SUCCEEDED;
 
   /* ENDASM */
 
-  if (strcmp(cp, "ENDASM") == 0) {
+  if (strcaselesscmp(cp, "ENDASM") == 0) {
 
     int endasm = 1, x;
 
@@ -6533,19 +7032,19 @@ int find_next_point(char *name) {
   macro_active = 0;
   while (get_next_token() != FAILED) {
     if (tmp[0] == '.') {
-      if (strcmp(cp, "ENDIF") == 0)
+      if (strcaselesscmp(cp, "ENDIF") == 0)
         depth--;
-      if (strcmp(cp, "ELSE") == 0 && depth == 1)
+      if (strcaselesscmp(cp, "ELSE") == 0 && depth == 1)
         depth--;
-      if (strcmp(cp, "E") == 0)
+      if (strcaselesscmp(cp, "E") == 0)
         break;
-      if (strcmp(cp, "IFDEF") == 0 || strcmp(cp, "IFNDEF") == 0 || strcmp(cp, "IFGR") == 0 || strcmp(cp, "IFLE") == 0 ||
-          strcmp(cp, "IFEQ") == 0 || strcmp(cp, "IFNEQ") == 0 || strcmp(cp, "IFDEFM") == 0 || strcmp(cp, "IFNDEFM") == 0 ||
-          strcmp(cp, "IF") == 0 || strcmp(cp, "IFGREQ") == 0 || strcmp(cp, "IFLEEQ") == 0 || strcmp(cp, "IFEXISTS") == 0)
+      if (strcaselesscmp(cp, "IFDEF") == 0 || strcaselesscmp(cp, "IFNDEF") == 0 || strcaselesscmp(cp, "IFGR") == 0 || strcaselesscmp(cp, "IFLE") == 0 ||
+          strcaselesscmp(cp, "IFEQ") == 0 || strcaselesscmp(cp, "IFNEQ") == 0 || strcaselesscmp(cp, "IFDEFM") == 0 || strcaselesscmp(cp, "IFNDEFM") == 0 ||
+          strcaselesscmp(cp, "IF") == 0 || strcaselesscmp(cp, "IFGREQ") == 0 || strcaselesscmp(cp, "IFLEEQ") == 0 || strcaselesscmp(cp, "IFEXISTS") == 0)
         depth++;
     }
     if (depth == 0) {
-      if (strcmp(cp, "ELSE") == 0)
+      if (strcaselesscmp(cp, "ELSE") == 0)
         ifdef++;
       macro_active = m;
       return SUCCEEDED;
